@@ -185,6 +185,10 @@ namespace Goop.Gameplay
 
         private void OnGUI()
         {
+            // Markers only in the lobby phase — mid-round a "has the gun" label floating over the Seeker
+            // would tell every Hider exactly where the Seeker is, through walls.
+            if (GameStateManager.Instance == null || GameStateManager.Instance.Phase.Value != GamePhase.LobbyIdle) return;
+
             Camera cam = Camera.main;
             if (cam == null) return;
 

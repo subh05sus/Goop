@@ -13,15 +13,32 @@ namespace Goop.UI
     /// </summary>
     public class PoseSelectorUI : MonoBehaviour
     {
-        [SerializeField] private float wheelRadius = 160f;
-        [SerializeField] private float deadzoneRadius = 40f;
+        [SerializeField] private float wheelRadius = 200f;
+        [SerializeField] private float deadzoneRadius = 45f;
 
         private PoseController _poseController;
         private PlayerController _playerController;
         private bool _wheelOpen;
         private int _hoveredIndex = -1;
+        private Texture2D[] _previews; // index 1..PoseCount; [0] unused (idle has no thumbnail)
 
         private const int SegmentCount = PoseController.PoseCount + 1; // + idle
+
+        private static string PoseLabel(int index) =>
+            index == 0 ? "Idle" :
+            (index - 1 < PoseCatalog.PoseNames.Length ? PoseCatalog.PoseNames[index - 1] : $"Pose {index}");
+
+        /// <summary>Thumbnails are pre-rendered at edit time into Resources/PosePreviews (pose_01..pose_18)
+        /// — zero runtime rendering cost, just a texture load on first wheel open.</summary>
+        private void EnsurePreviews()
+        {
+            if (_previews != null) return;
+            _previews = new Texture2D[SegmentCount];
+            for (int i = 1; i < SegmentCount; i++)
+            {
+                _previews[i] = Resources.Load<Texture2D>($"PosePreviews/pose_{i:00}");
+            }
+        }
 
         public void Initialize(PoseController poseController)
         {
@@ -91,25 +108,39 @@ namespace Goop.UI
 
             if (!_wheelOpen)
             {
-                int index = _poseController.PoseIndex.Value;
-                string label = index == PoseController.IdlePoseIndex ? "Idle" : $"Pose {index}";
-                GUI.Label(new Rect(10, Screen.height - 30, 300, 25), $"Pose: {label}  (hold R for pose wheel)");
+                GUI.Label(new Rect(10, Screen.height - 30, 300, 25),
+                    $"Pose: {PoseLabel(_poseController.PoseIndex.Value)}  (hold R for pose wheel)");
                 return;
             }
 
+            EnsurePreviews();
             Vector2 center = new(Screen.width / 2f, Screen.height / 2f);
-            GUI.Label(new Rect(center.x - 60, center.y - 10, 120, 20),
-                _hoveredIndex < 0 ? "(release = keep)" : (_hoveredIndex == 0 ? "Idle" : $"Pose {_hoveredIndex}"));
+            GUI.Label(new Rect(center.x - 70, center.y - 10, 140, 20),
+                _hoveredIndex < 0 ? "(release = keep)" : PoseLabel(_hoveredIndex),
+                new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold });
 
             for (int i = 0; i < SegmentCount; i++)
             {
                 float segAngle = (i + 0.5f) / SegmentCount * 360f * Mathf.Deg2Rad;
                 Vector2 pos = center + new Vector2(Mathf.Sin(segAngle), -Mathf.Cos(segAngle)) * wheelRadius;
+                bool hovered = i == _hoveredIndex;
+                float size = hovered ? 62f : 48f;
 
                 var prev = GUI.backgroundColor;
-                GUI.backgroundColor = i == _hoveredIndex ? Color.yellow : Color.white;
-                string label = i == 0 ? "Idle" : i.ToString();
-                GUI.Box(new Rect(pos.x - 20, pos.y - 14, 40, 28), label);
+                GUI.backgroundColor = hovered ? Color.yellow : Color.white;
+                Rect box = new(pos.x - size / 2f, pos.y - size / 2f - 6f, size, size);
+                GUI.Box(box, "");
+                if (i > 0 && _previews[i] != null)
+                {
+                    GUI.DrawTexture(new Rect(box.x + 3, box.y + 3, box.width - 6, box.height - 6),
+                        _previews[i], ScaleMode.ScaleToFit, true);
+                }
+                var labelStyle = new GUIStyle(GUI.skin.label)
+                {
+                    alignment = TextAnchor.MiddleCenter,
+                    fontSize = hovered ? 12 : 10
+                };
+                GUI.Label(new Rect(pos.x - 45, box.yMax - 2, 90, 16), PoseLabel(i), labelStyle);
                 GUI.backgroundColor = prev;
             }
         }

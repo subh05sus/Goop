@@ -412,3 +412,44 @@ Game Feel doc flow implemented without any multi-scene tricks: the lobby room is
 away from the arena inside the same scene. "Seeker can't see the map during Hide" is just distance +
 walls. Avoids NGO additive-scene visibility management entirely. Consequence: any through-wall tool
 (X-ray) MUST be phase-gated or it trivially defeats the separation.
+
+## 2026-07-24 — THE paint-mode bug: BakeMesh + x100 import scale = collider 100x too big
+goop_guy's SkinnedMeshRenderer sits under a x100 transform scale (Blender FBX unit compensation).
+Legacy `SkinnedMeshRenderer.BakeMesh(mesh)` bakes vertices WITH that scale applied, and the MeshCollider
+on the same GameObject then inherits the x100 transform ON TOP — measured collider world size was
+116 x 57 x 210 METERS. Every paint ray / eyedropper ray / seeker aim ray / camera spherecast interacted
+with an invisible building-sized collider. Fix: `BakeMesh(mesh, useScale: true)` bakes unscaled vertices
+(verified empirically: bounds 0.0117 vs 1.167), letting the transform apply scale exactly once.
+Lesson: after ANY runtime-generated collider on imported models, sanity-check collider bounds vs
+renderer.bounds — a silent scale mismatch produces "raycasts just don't work" with zero errors.
+
+## 2026-07-24 — Eyedropper single-raycast died on own capsule; pink = shader OOM
+- Third-person camera sits behind the player, so a single center-screen Physics.Raycast almost always hits
+  the player's own CharacterController capsule first. Eyedropper now RaycastAll-sorts and skips own
+  non-paintable colliders; paintable bodies (own or other players') sample their live paint Texture2D.
+- MPPM virtual player showing an all-pink character: console had "Shader error 'URP/Lit': out of memory
+  during compilation" — the VP ran out of memory compiling shader variants, magenta fallback. Not a
+  material bug per se, but PaintableSkin now builds its material from Shader.Find("Universal Render
+  Pipeline/Lit") explicitly instead of cloning the FBX import material (which can reference non-URP
+  shaders on some clients). Restarting the VP clears the OOM case.
+- UnityTransport MaxPacketQueueSize raised 128 -> 512 (persistent "Receive queue is full" warnings).
+
+## 2026-07-24 — Editor asset-database wedged into Read Only mid-session
+During the goop_character.fbx swap, interrupted RunCommand calls ("User interactions are not supported for
+MCP tool calls") left the asset pipeline in "Asset Database is set to Read Only, but it has found
+out-of-date assets. This should not happen!" — after that, EVERY import silently produced 0 sub-assets and
+every AssetDatabase.CreateAsset failed. StopAssetEditing unwind didn't help (counter was already 0).
+Only recovery: restart the editor. Consequences + mitigations:
+- Asset-creating editor automation now lives in a committed MenuItem tool (Goop > Complete Character Swap)
+  instead of throwaway RunCommand scripts — rerunnable after any restart, survives the wedge.
+- AnimatorController.CreateAnimatorControllerAtPath is fragile in a wedged/half-imported state (object
+  destroyed mid-call); REBUILDING an existing controller asset in place (RemoveState/RemoveParameter, then
+  re-add) kept working when creation didn't.
+
+## 2026-07-24 — Seeker shooting never registered: own-capsule raycast (same class as eyedropper bug)
+SeekerTagController used one Physics.Raycast from the camera — which sits BEHIND the Seeker, so the first
+hit was almost always the Seeker's own CharacterController capsule → targetId 0 → server-registered miss
+on every shot. Fixed with RaycastAll + skip-own-root + first-non-self-hit-decides (player = candidate,
+world = blocked). Server LOS re-check got the same treatment (skips both shooter's and target's own
+colliders instead of a fragile single-hit comparison). Standing rule: ANY center-screen ray from a
+third-person camera must skip the local player's colliders first.

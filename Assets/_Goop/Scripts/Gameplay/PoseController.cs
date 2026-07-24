@@ -12,7 +12,7 @@ namespace Goop.Gameplay
     [RequireComponent(typeof(Animator))]
     public class PoseController : NetworkBehaviour
     {
-        public const int PoseCount = 19;
+        public const int PoseCount = 18; // goop_character.fbx poses, see PoseCatalog
         public const int IdlePoseIndex = 0;
 
         public NetworkVariable<int> PoseIndex = new(

@@ -80,12 +80,14 @@ namespace Goop.Paint
                 _playerController.OrbitCamera(Mouse.current.delta.ReadValue());
             }
 
-            // Eyedropper: Space samples whatever is under the cursor.
+            // Eyedropper: Space samples whatever is under the cursor. Routed through the palette so the
+            // hue wheel jumps to the sampled color too.
             if (Keyboard.current.spaceKey.wasPressedThisFrame)
             {
                 if (_skin.TrySampleWorldColor(Mouse.current.position.ReadValue(), out Color32 sampled))
                 {
-                    _skin.CurrentColor = sampled;
+                    if (_palette != null) _palette.SetColor(sampled);
+                    else _skin.CurrentColor = sampled;
                 }
             }
         }

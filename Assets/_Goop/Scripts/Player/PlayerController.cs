@@ -15,6 +15,7 @@ namespace Goop.Player
     {
         [Header("Movement")]
         [SerializeField] private float moveSpeed = 5f;
+        [SerializeField] private float runSpeed = 7.5f;
         [SerializeField] private float crouchSpeed = 2.5f;
         [SerializeField] private float rotationSpeed = 720f;
         [SerializeField] private float gravity = -20f;
@@ -28,6 +29,7 @@ namespace Goop.Player
         [Header("Third-person camera")]
         [SerializeField] private float cameraDistance = 4.5f;
         [SerializeField] private float cameraShoulderHeight = 1.6f;
+        [SerializeField] private float gunShoulderOffset = 0.6f; // lateral shift while holding the gun
         [SerializeField] private float lookSensitivity = 0.12f;
         [SerializeField] private float minPitch = -55f;
         [SerializeField] private float maxPitch = 75f;
@@ -71,6 +73,8 @@ namespace Goop.Player
         private InputAction _lookAction;
         private InputAction _jumpAction;
         private InputAction _crouchAction;
+        private InputAction _sprintAction;
+        private Goop.Gameplay.PoseController _poseController;
         private Transform _cameraRig;
         private Camera _camera;
         private AudioListener _listener;
@@ -97,8 +101,10 @@ namespace Goop.Player
             _lookAction = map.FindAction("Look", throwIfNotFound: true);
             _jumpAction = map.FindAction("Jump", throwIfNotFound: true);
             _crouchAction = map.FindAction("Crouch", throwIfNotFound: true);
+            _sprintAction = map.FindAction("Sprint", throwIfNotFound: true);
             map.Enable();
 
+            _poseController = GetComponentInChildren<Goop.Gameplay.PoseController>();
             _yaw = transform.eulerAngles.y;
             CreateCameraRig();
         }
@@ -207,8 +213,17 @@ namespace Goop.Player
             }
             _verticalVelocity.y += gravity * Time.deltaTime;
 
-            float speed = IsCrouching ? crouchSpeed : moveSpeed;
+            bool running = !inputBlocked && !frozen && !IsCrouching
+                           && _sprintAction != null && _sprintAction.IsPressed();
+            float speed = IsCrouching ? crouchSpeed : (running ? runSpeed : moveSpeed);
             _controller.Move((moveDir * speed + _verticalVelocity) * Time.deltaTime);
+
+            // Walking out of a pose breaks it — the silhouette lock is for holding still.
+            if (moveDir.sqrMagnitude > 0.001f && _poseController != null
+                && _poseController.PoseIndex.Value != Goop.Gameplay.PoseController.IdlePoseIndex)
+            {
+                _poseController.SetPose(Goop.Gameplay.PoseController.IdlePoseIndex);
+            }
         }
 
         private void HandleCrouch(bool inputBlocked)
@@ -238,6 +253,15 @@ namespace Goop.Player
             float pivotHeight = PaintViewActive ? standingHeight * 0.55f
                 : (IsCrouching ? cameraShoulderHeight * 0.6f : cameraShoulderHeight);
             Vector3 pivot = transform.position + Vector3.up * pivotHeight;
+
+            // Gun holder gets an over-the-shoulder view: character shifts left of center so the
+            // crosshair has a clear line — proper aiming view instead of shooting "through" yourself.
+            bool holdingGun = Goop.Gameplay.GunPickup.Instance != null
+                && Goop.Gameplay.GunPickup.Instance.HolderClientId.Value == OwnerClientId;
+            if (holdingGun && !PaintViewActive)
+            {
+                pivot += Quaternion.Euler(0f, _yaw, 0f) * new Vector3(gunShoulderOffset, 0f, 0f);
+            }
             Vector3 desiredPos = pivot + camRot * new Vector3(0f, 0f, -distance);
 
             // Pull the camera in front of anything solid between the player and its desired position so it

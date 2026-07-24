@@ -6,22 +6,26 @@ using UnityEngine.InputSystem;
 namespace Goop.Gameplay
 {
     /// <summary>
-    /// Seeker point-and-tag (PRD 7.4). The owning client raycasts to pick a candidate target for
-    /// responsiveness, but a catch is only ever confirmed by an authoritative server-side range + line-of-
-    /// sight check — the client's raycast result is never trusted directly (closes the "trust the client"
-    /// exploit called out in PRD 9).
+    /// Seeker shooting (PRD 7.4 + Game Feel doc §8). The owning client aims with a center-screen
+    /// crosshair and fires with Attack (LMB). The client walks ALL ray hits and skips its own colliders
+    /// (the camera sits behind the player, so a naive single raycast always hit the Seeker's own capsule —
+    /// this was why shooting "didn't work"). A catch is only confirmed by the server's own range +
+    /// line-of-sight re-check; the client's ray is never trusted (PRD 9).
+    /// Also draws the crosshair and hit/miss feedback for the gun holder.
     /// </summary>
     public class SeekerTagController : NetworkBehaviour
     {
-        [SerializeField] private float tagRange = 4f;
-        [SerializeField] private float aimRayDistance = 30f;
+        [SerializeField] private float tagRange = 18f;
+        [SerializeField] private float aimRayDistance = 60f;
+        [SerializeField] private float shotCooldown = 1f;
         [SerializeField] private InputActionAsset inputActions;
 
         private NetworkPlayer _networkPlayer;
         private InputAction _attackAction;
+        private float _lastShotTime = -999f;
+        private float _feedbackUntil;
+        private bool _feedbackWasHit;
 
-        // Never cache Camera.main across scenes/phases — the player camera rig is enabled/disabled as we
-        // move between lobby room and arena, and a cached reference can go stale (learned the hard way).
         private Camera OwnerCamera => Camera.main;
 
         public override void OnNetworkSpawn()
@@ -40,24 +44,39 @@ namespace Goop.Gameplay
             if (_attackAction != null) _attackAction.performed -= OnAttackPerformed;
         }
 
+        private bool IsHoldingGun =>
+            GunPickup.Instance != null
+            && NetworkManager.Singleton != null
+            && GunPickup.Instance.HolderClientId.Value == OwnerClientId;
+
         private void OnAttackPerformed(InputAction.CallbackContext ctx)
         {
             if (_networkPlayer.CurrentTeam.Value != Team.Seeker) return;
-            Camera cam = OwnerCamera;
-            if (cam == null) return;
             var gsm = GameStateManager.Instance;
             if (gsm == null || gsm.Phase.Value != GamePhase.Hunt) return;
+            if (Time.time - _lastShotTime < shotCooldown) return;
 
+            Camera cam = OwnerCamera;
+            if (cam == null) return;
+            _lastShotTime = Time.time;
+
+            // Fire from the crosshair: walk all hits, skip our own colliders, take the first thing hit.
+            // If that first thing belongs to a player, that's our candidate target; if it's world
+            // geometry, the shot is blocked and it's a miss.
             ulong targetId = 0;
-            Vector2 screenCenter = new(Screen.width / 2f, Screen.height / 2f);
-            Ray ray = cam.ScreenPointToRay(screenCenter);
-            if (Physics.Raycast(ray, out RaycastHit hit, aimRayDistance))
+            Ray ray = cam.ScreenPointToRay(new Vector3(Screen.width / 2f, Screen.height / 2f, 0f));
+            RaycastHit[] hits = Physics.RaycastAll(ray, aimRayDistance, ~0, QueryTriggerInteraction.Ignore);
+            System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
+            foreach (var hit in hits)
             {
+                if (hit.collider.transform.root == transform.root) continue; // own body/camera rig
+
                 var targetPlayer = hit.collider.GetComponentInParent<NetworkPlayer>();
                 if (targetPlayer != null && targetPlayer != _networkPlayer)
                 {
                     targetId = targetPlayer.NetworkObjectId;
                 }
+                break; // first non-self hit decides: player = candidate, world = blocked
             }
 
             RequestTagServerRpc(targetId);
@@ -81,9 +100,17 @@ namespace Goop.Gameplay
 
                     if (distance <= tagRange)
                     {
-                        // Server-side line-of-sight re-check — a wall between attacker and target blocks the tag.
-                        bool blocked = Physics.Raycast(origin, toTarget.normalized, out RaycastHit blockHit, distance)
-                                       && blockHit.collider.GetComponentInParent<NetworkPlayer>() != targetPlayer;
+                        // Server-side line-of-sight re-check — walk all hits, skip both bodies' own
+                        // colliders, and see whether world geometry sits between shooter and target.
+                        bool blocked = false;
+                        RaycastHit[] hits = Physics.RaycastAll(origin, toTarget.normalized, distance, ~0, QueryTriggerInteraction.Ignore);
+                        foreach (var hit in hits)
+                        {
+                            if (hit.collider.transform.root == transform.root) continue;
+                            if (hit.collider.transform.root == targetObj.transform.root) continue;
+                            blocked = true;
+                            break;
+                        }
                         if (!blocked)
                         {
                             targetPlayer.IsAlive.Value = false;
@@ -99,7 +126,20 @@ namespace Goop.Gameplay
                 RegisterMiss();
             }
 
+            TagResultClientRpc(confirmedHit, RpcTargetOwner());
             GameStateManager.Instance?.CheckEarlyRoundEnd();
+        }
+
+        private ClientRpcParams RpcTargetOwner() => new()
+        {
+            Send = new ClientRpcSendParams { TargetClientIds = new[] { OwnerClientId } }
+        };
+
+        [ClientRpc]
+        private void TagResultClientRpc(bool hit, ClientRpcParams rpcParams = default)
+        {
+            _feedbackWasHit = hit;
+            _feedbackUntil = Time.time + 0.6f;
         }
 
         private void RegisterMiss()
@@ -107,6 +147,39 @@ namespace Goop.Gameplay
             if (!MatchSettings.AmmoModeEnabled) return;
             if (_networkPlayer.AmmoRemaining.Value <= 0) return;
             _networkPlayer.AmmoRemaining.Value -= 1;
+        }
+
+        private void OnGUI()
+        {
+            if (!IsOwner || _networkPlayer == null) return;
+            var gsm = GameStateManager.Instance;
+            if (gsm == null) return;
+
+            // Crosshair whenever this player is holding the gun (lobby practice aim included).
+            if (!IsHoldingGun && _networkPlayer.CurrentTeam.Value != Team.Seeker) return;
+
+            float cx = Screen.width / 2f, cy = Screen.height / 2f;
+            var prev = GUI.color;
+
+            bool onCooldown = Time.time - _lastShotTime < shotCooldown && gsm.Phase.Value == GamePhase.Hunt;
+            GUI.color = onCooldown ? new Color(1f, 1f, 1f, 0.35f) : Color.white;
+            GUI.DrawTexture(new Rect(cx - 9, cy - 1, 6, 2), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(cx + 3, cy - 1, 6, 2), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(cx - 1, cy - 9, 2, 6), Texture2D.whiteTexture);
+            GUI.DrawTexture(new Rect(cx - 1, cy + 3, 2, 6), Texture2D.whiteTexture);
+
+            if (Time.time < _feedbackUntil)
+            {
+                GUI.color = _feedbackWasHit ? Color.green : Color.red;
+                var style = new GUIStyle(GUI.skin.label)
+                {
+                    alignment = TextAnchor.MiddleCenter,
+                    fontSize = 22,
+                    fontStyle = FontStyle.Bold
+                };
+                GUI.Label(new Rect(cx - 60, cy + 20, 120, 30), _feedbackWasHit ? "HIT!" : "MISS", style);
+            }
+            GUI.color = prev;
         }
     }
 }

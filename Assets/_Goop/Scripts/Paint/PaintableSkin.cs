@@ -82,17 +82,27 @@ namespace Goop.Paint
             _paintTexture.SetPixels32(basePixels);
             _paintTexture.Apply();
 
-            var materialInstance = new Material(_renderer.sharedMaterial)
-            {
-                mainTexture = _paintTexture
-            };
+            // Build the material from the URP Lit shader explicitly instead of cloning the FBX's imported
+            // material — the imported one can reference a non-URP shader on some clients (MPPM virtual
+            // players saw solid magenta/pink because of exactly that).
+            Shader lit = Shader.Find("Universal Render Pipeline/Lit");
+            Material materialInstance = lit != null ? new Material(lit) : new Material(_renderer.sharedMaterial);
+            materialInstance.color = Color.white;
+            if (materialInstance.HasProperty("_BaseMap")) materialInstance.SetTexture("_BaseMap", _paintTexture);
+            else materialInstance.mainTexture = _paintTexture;
+            if (materialInstance.HasProperty("_Smoothness")) materialInstance.SetFloat("_Smoothness", 0.35f);
             _renderer.material = materialInstance;
         }
 
         private void SetupCollider()
         {
+            // useScale:true bakes vertices WITHOUT the transform scale applied. The goop_guy import has a
+            // x100 transform scale — the legacy BakeMesh() applies that scale into the vertices AND the
+            // MeshCollider then inherits the x100 transform on top, producing a collider 100x too big
+            // (measured: 116x57x210 meters). Every paint/eyedropper ray missed it. This was THE
+            // "paint mode doesn't work" bug.
             var bakedMesh = new Mesh();
-            _renderer.BakeMesh(bakedMesh);
+            _renderer.BakeMesh(bakedMesh, true);
             var meshCollider = _renderer.gameObject.AddComponent<MeshCollider>();
             meshCollider.sharedMesh = bakedMesh;
             _collider = meshCollider;
@@ -107,6 +117,7 @@ namespace Goop.Paint
             }
 
             if (!IsOwner || !PaintingEnabled) return;
+            if (Goop.UI.PaletteUI.PointerOverPaintUI) return; // clicking the palette must not also paint
             if (Mouse.current == null || !Mouse.current.leftButton.isPressed) return;
             if (Strokes.Count >= MaxStrokesPerRound) return;
 
@@ -138,8 +149,14 @@ namespace Goop.Paint
             Strokes.Add(stroke);
         }
 
-        /// <summary>3D eyedropper: sample the color of whatever world surface is under the cursor
-        /// (own body included — its live paint texture is sampled at the hit UV).</summary>
+        /// <summary>Live paint texture sample (used by the eyedropper against any player's body).</summary>
+        public Color32 SampleTexture(Vector2 uv) => _paintTexture.GetPixelBilinear(uv.x, uv.y);
+
+        /// <summary>3D eyedropper: sample whatever surface is under the cursor. Walks ALL hits sorted by
+        /// distance and skips this player's own non-paintable colliders (the camera sits behind the player,
+        /// so the first hit is very often our own CharacterController capsule — the old single-raycast
+        /// version died on that every time). Own body and other players sample their live paint texture;
+        /// world geometry samples its material color.</summary>
         public bool TrySampleWorldColor(Vector2 screenPos, out Color32 sampled)
         {
             sampled = default;
@@ -147,20 +164,35 @@ namespace Goop.Paint
             if (cam == null) return false;
 
             Ray ray = cam.ScreenPointToRay(screenPos);
-            if (!Physics.Raycast(ray, out RaycastHit hit, 100f, ~0, QueryTriggerInteraction.Ignore)) return false;
+            RaycastHit[] hits = Physics.RaycastAll(ray, 100f, ~0, QueryTriggerInteraction.Ignore);
+            System.Array.Sort(hits, (a, b) => a.distance.CompareTo(b.distance));
 
-            if (hit.collider == _collider)
+            foreach (var hit in hits)
             {
-                sampled = _paintTexture.GetPixelBilinear(hit.textureCoord.x, hit.textureCoord.y);
-                return true;
-            }
+                // Any paintable body (own or another player's): sample its live texture at the hit UV.
+                // textureCoord is only meaningful for MeshCollider hits — the paintable collider is one.
+                var paintable = hit.collider.GetComponentInParent<PaintableSkin>();
+                if (paintable != null)
+                {
+                    if (hit.collider is MeshCollider)
+                    {
+                        sampled = paintable.SampleTexture(hit.textureCoord);
+                        return true;
+                    }
+                    continue; // a player's capsule/controller collider — skip, keep looking behind it
+                }
 
-            var rend = hit.collider.GetComponent<Renderer>();
-            if (rend != null && rend.sharedMaterial != null)
-            {
-                var mat = rend.sharedMaterial;
-                if (mat.HasProperty("_BaseColor")) { sampled = mat.GetColor("_BaseColor"); return true; }
-                if (mat.HasProperty("_Color")) { sampled = mat.color; return true; }
+                if (hit.collider.transform.root == transform.root) continue;
+
+                var rend = hit.collider.GetComponent<Renderer>();
+                if (rend != null && rend.sharedMaterial != null)
+                {
+                    var mat = rend.sharedMaterial;
+                    if (mat.HasProperty("_BaseColor")) { sampled = mat.GetColor("_BaseColor"); return true; }
+                    if (mat.HasProperty("_Color")) { sampled = mat.color; return true; }
+                }
+                // Something un-sampleable (no renderer) — it still blocks the ray, stop here.
+                return false;
             }
             return false;
         }
