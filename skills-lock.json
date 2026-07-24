@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "unity-animation": {
+      "source": "gamedev-skills/awesome-gamedev-agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/unity/unity-animation/SKILL.md",
+      "computedHash": "0888446ec0da58cf800c3c378ee9611cbff07da585de387e9c749c1679d26e97"
+    },
+    "unity-developer": {
+      "source": "rmyndharis/antigravity-skills",
+      "sourceType": "github",
+      "skillPath": "skills/unity-developer/SKILL.md",
+      "computedHash": "c6187682ca8edc8bdf87bc96bc4a28b7117dab7f1f2ea92275690f4e62dae921"
+    }
+  }
+}

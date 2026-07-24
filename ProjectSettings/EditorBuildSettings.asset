@@ -6,8 +6,20 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 1
-    path: Assets/Scenes/SampleScene.unity
-    guid: 99c9720ab356a0642a771bea13969a05
+    path: Assets/_Goop/Scenes/Bootstrap.unity
+    guid: 0da85c7bf31612b47aa169451eb032ce
+  - enabled: 1
+    path: Assets/_Goop/Scenes/MainMenu.unity
+    guid: bfb740f7d8f2a1545b790420828333fb
+  - enabled: 1
+    path: Assets/Scenes/Lobby.unity
+    guid: 5730fd578019eb44d8470924b8a042e7
+  - enabled: 1
+    path: Assets/_Goop/Scenes/Arena_Greybox.unity
+    guid: 178736e345ccbd7468dbd6c1d12ada1e
   m_configObjects:
+    com.unity.adaptivePerformance.basic.provider_settings: {fileID: 11400000, guid: 5ac8e32742a0c3a4586e148ef3399440, type: 2}
+    com.unity.adaptiveperformance.loader_settings: {fileID: 11400000, guid: e38fcfacb2bc1cd4394c537a31748244, type: 2}
+    com.unity.adaptiveperformance.simulator.provider_settings: {fileID: 11400000, guid: c732ec2e2801b1644abcdb667c12ceaf, type: 2}
+    com.unity.dt.app-ui: {fileID: 11400000, guid: 1b1c20d82303e4b5781c3ef50ac1449f, type: 2}
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}
-  m_UseUCBPForAssetBundles: 0

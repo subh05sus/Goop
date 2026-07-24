@@ -1,0 +1,271 @@
+using Goop.Gameplay;
+using Unity.Netcode;
+using UnityEngine;
+using UnityEngine.InputSystem;
+
+namespace Goop.Player
+{
+    /// <summary>
+    /// Owner-authoritative third-person controller: mouse-orbit camera, camera-relative WASD at a single
+    /// fixed speed (no sprint — deliberate design choice), jump, crouch. The owner creates its own camera
+    /// rig as a child of the player so it survives NGO scene migration and never depends on a scene camera.
+    /// </summary>
+    [RequireComponent(typeof(CharacterController))]
+    public class PlayerController : NetworkBehaviour
+    {
+        [Header("Movement")]
+        [SerializeField] private float moveSpeed = 5f;
+        [SerializeField] private float crouchSpeed = 2.5f;
+        [SerializeField] private float rotationSpeed = 720f;
+        [SerializeField] private float gravity = -20f;
+        [SerializeField] private float jumpHeight = 1.1f;
+        [SerializeField] private InputActionAsset inputActions;
+
+        [Header("Crouch")]
+        [SerializeField] private float standingHeight = 1.8f;
+        [SerializeField] private float crouchedHeight = 0.9f;
+
+        [Header("Third-person camera")]
+        [SerializeField] private float cameraDistance = 4.5f;
+        [SerializeField] private float cameraShoulderHeight = 1.6f;
+        [SerializeField] private float lookSensitivity = 0.12f;
+        [SerializeField] private float minPitch = -55f;
+        [SerializeField] private float maxPitch = 75f;
+        [SerializeField] private float cameraCollisionRadius = 0.25f;
+
+        /// <summary>True while any UI system (paint mode, chat, pause menu, pose wheel) owns the
+        /// mouse/keyboard. Gravity still applies; look + move input are ignored, cursor is released.
+        /// Lock ownership is per-source so overlapping systems can't stomp each other's lock.</summary>
+        public bool MovementLocked => _movementLocks.Count > 0;
+
+        private readonly System.Collections.Generic.HashSet<object> _movementLocks = new();
+
+        public void SetMovementLock(object source, bool locked)
+        {
+            if (locked) _movementLocks.Add(source);
+            else _movementLocks.Remove(source);
+        }
+
+        /// <summary>Paint mode pulls the camera in close so the player can inspect their own paint job;
+        /// orbiting is then driven explicitly via OrbitCamera (middle-mouse drag) instead of free look.</summary>
+        public bool PaintViewActive { get; set; }
+
+        /// <summary>Set while surface-attached: another system drives the transform directly, so normal
+        /// WASD movement, gravity, and jump are all skipped. Mouse look stays live.</summary>
+        public bool MovementOverridden { get; set; }
+
+        public bool IsCrouching { get; private set; }
+
+        /// <summary>Exposed for the pause menu's sensitivity slider.</summary>
+        public float LookSensitivity
+        {
+            get => lookSensitivity;
+            set => lookSensitivity = Mathf.Clamp(value, 0.01f, 1f);
+        }
+
+        public Camera OwnerCamera => _camera;
+
+        private CharacterController _controller;
+        private NetworkPlayer _networkPlayer;
+        private InputAction _moveAction;
+        private InputAction _lookAction;
+        private InputAction _jumpAction;
+        private InputAction _crouchAction;
+        private Transform _cameraRig;
+        private Camera _camera;
+        private AudioListener _listener;
+        private Vector3 _verticalVelocity;
+        private float _yaw;
+        private float _pitch = 15f;
+
+        private void Awake()
+        {
+            _controller = GetComponent<CharacterController>();
+            _networkPlayer = GetComponent<NetworkPlayer>();
+        }
+
+        public override void OnNetworkSpawn()
+        {
+            if (!IsOwner)
+            {
+                enabled = false;
+                return;
+            }
+
+            InputActionMap map = inputActions.FindActionMap("Player", throwIfNotFound: true);
+            _moveAction = map.FindAction("Move", throwIfNotFound: true);
+            _lookAction = map.FindAction("Look", throwIfNotFound: true);
+            _jumpAction = map.FindAction("Jump", throwIfNotFound: true);
+            _crouchAction = map.FindAction("Crouch", throwIfNotFound: true);
+            map.Enable();
+
+            _yaw = transform.eulerAngles.y;
+            CreateCameraRig();
+        }
+
+        public override void OnNetworkDespawn()
+        {
+            if (!IsOwner) return;
+            inputActions.FindActionMap("Player")?.Disable();
+            Cursor.lockState = CursorLockMode.None;
+            Cursor.visible = true;
+            if (_cameraRig != null) Destroy(_cameraRig.gameObject);
+        }
+
+        /// <summary>Own camera, parented under the player: survives networked scene loads with the player
+        /// object and never depends on a scene having (or keeping) a Camera.main of its own.</summary>
+        private void CreateCameraRig()
+        {
+            var rigGo = new GameObject("PlayerCameraRig");
+            // Tagged MainCamera so existing Camera.main-based raycasts (paint brush, seeker tag,
+            // eyedropper) resolve to this rig once the arena's own cameras are disabled.
+            rigGo.tag = "MainCamera";
+            rigGo.transform.SetParent(transform, worldPositionStays: false);
+            _camera = rigGo.AddComponent<Camera>();
+            // Starts disabled — the player object also exists in the Lobby scene, where the scene's own
+            // camera/UI should keep rendering. Update() enables it once we're actually in the arena.
+            _camera.enabled = false;
+            _listener = rigGo.AddComponent<AudioListener>();
+            _listener.enabled = false;
+            _cameraRig = rigGo.transform;
+        }
+
+        private bool InArena => GameStateManager.Instance != null;
+
+        private void Update()
+        {
+            if (!IsOwner) return;
+
+            // Outside the arena (lobby/menu scenes) the player object exists but shouldn't fight the UI
+            // for the mouse — camera off, cursor free, no movement.
+            if (!InArena)
+            {
+                if (_camera != null && _camera.enabled) _camera.enabled = false;
+                SetCursorLocked(false);
+                return;
+            }
+
+            if (_camera != null && !_camera.enabled)
+            {
+                // Entering the arena: take over rendering. Disable any stray scene camera/listener.
+                foreach (var other in FindObjectsByType<Camera>())
+                {
+                    if (other != _camera) other.enabled = false;
+                }
+                foreach (var listener in FindObjectsByType<AudioListener>())
+                {
+                    if (listener.gameObject != _camera.gameObject) listener.enabled = false;
+                }
+                _camera.enabled = true;
+                _listener.enabled = true;
+            }
+
+            bool inputBlocked = MovementLocked;
+            SetCursorLocked(!inputBlocked);
+
+            if (!inputBlocked)
+            {
+                Vector2 look = _lookAction.ReadValue<Vector2>();
+                _yaw += look.x * lookSensitivity;
+                _pitch = Mathf.Clamp(_pitch - look.y * lookSensitivity, minPitch, maxPitch);
+            }
+
+            bool frozen = _networkPlayer != null && _networkPlayer.IsFrozen.Value;
+
+            if (MovementOverridden)
+            {
+                // Surface attach drives the transform; nothing to do but keep looking around.
+                return;
+            }
+
+            HandleCrouch(inputBlocked || frozen);
+
+            Vector3 moveDir = Vector3.zero;
+            if (!inputBlocked && !frozen)
+            {
+                Vector2 move = _moveAction.ReadValue<Vector2>();
+                // Camera-relative: input is rotated by the camera yaw so W always means "away from camera".
+                Quaternion camYaw = Quaternion.Euler(0f, _yaw, 0f);
+                moveDir = camYaw * new Vector3(move.x, 0f, move.y);
+                moveDir = Vector3.ClampMagnitude(moveDir, 1f);
+
+                if (moveDir.sqrMagnitude > 0.0001f)
+                {
+                    Quaternion targetRot = Quaternion.LookRotation(moveDir, Vector3.up);
+                    transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, rotationSpeed * Time.deltaTime);
+                }
+
+                if (_jumpAction.WasPressedThisFrame() && _controller.isGrounded && !IsCrouching)
+                {
+                    _verticalVelocity.y = Mathf.Sqrt(2f * -gravity * jumpHeight);
+                }
+            }
+
+            if (_controller.isGrounded && _verticalVelocity.y < 0f)
+            {
+                _verticalVelocity.y = -1f;
+            }
+            _verticalVelocity.y += gravity * Time.deltaTime;
+
+            float speed = IsCrouching ? crouchSpeed : moveSpeed;
+            _controller.Move((moveDir * speed + _verticalVelocity) * Time.deltaTime);
+        }
+
+        private void HandleCrouch(bool inputBlocked)
+        {
+            bool wantCrouch = !inputBlocked && _crouchAction.IsPressed();
+            if (wantCrouch == IsCrouching) return;
+
+            IsCrouching = wantCrouch;
+            float height = IsCrouching ? crouchedHeight : standingHeight;
+            _controller.height = height;
+            _controller.center = new Vector3(0f, height * 0.5f, 0f);
+        }
+
+        /// <summary>Externally-driven camera orbit (paint mode middle-mouse drag).</summary>
+        public void OrbitCamera(Vector2 pixelDelta)
+        {
+            _yaw += pixelDelta.x * lookSensitivity;
+            _pitch = Mathf.Clamp(_pitch - pixelDelta.y * lookSensitivity, minPitch, maxPitch);
+        }
+
+        private void LateUpdate()
+        {
+            if (!IsOwner || _cameraRig == null || _camera == null || !_camera.enabled) return;
+
+            float distance = PaintViewActive ? cameraDistance * 0.55f : cameraDistance;
+            Quaternion camRot = Quaternion.Euler(_pitch, _yaw, 0f);
+            float pivotHeight = PaintViewActive ? standingHeight * 0.55f
+                : (IsCrouching ? cameraShoulderHeight * 0.6f : cameraShoulderHeight);
+            Vector3 pivot = transform.position + Vector3.up * pivotHeight;
+            Vector3 desiredPos = pivot + camRot * new Vector3(0f, 0f, -distance);
+
+            // Pull the camera in front of anything solid between the player and its desired position so it
+            // never clips through walls; ignore the player's own colliders.
+            float targetDistance = distance;
+            Vector3 toCamera = (desiredPos - pivot).normalized;
+            var hits = Physics.SphereCastAll(pivot, cameraCollisionRadius, toCamera, distance, ~0, QueryTriggerInteraction.Ignore);
+            foreach (var hit in hits)
+            {
+                if (hit.collider.transform.root == transform.root) continue;
+                if (hit.distance > 0f && hit.distance < targetDistance) targetDistance = hit.distance;
+            }
+
+            _cameraRig.SetPositionAndRotation(pivot + camRot * new Vector3(0f, 0f, -targetDistance), camRot);
+        }
+
+        private void SetCursorLocked(bool locked)
+        {
+            if (locked && Cursor.lockState != CursorLockMode.Locked)
+            {
+                Cursor.lockState = CursorLockMode.Locked;
+                Cursor.visible = false;
+            }
+            else if (!locked && Cursor.lockState == CursorLockMode.Locked)
+            {
+                Cursor.lockState = CursorLockMode.None;
+                Cursor.visible = true;
+            }
+        }
+    }
+}
