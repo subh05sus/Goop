@@ -58,7 +58,12 @@ namespace Goop.UI
             // Don't open over chat/paint/pause — any active input lock means R belongs to someone else.
             bool inputBusy = _playerController != null && _playerController.MovementLocked;
 
-            if (!_wheelOpen && !inputBusy && Keyboard.current.rKey.wasPressedThisFrame)
+            // Poses are a Hider tool — the Seeker's stances are stand/crouch(Ctrl)/prone(X) only.
+            var netPlayer = GetComponentInParent<NetworkPlayer>();
+            bool isSeeker = netPlayer != null && netPlayer.CurrentTeam.Value == Team.Seeker;
+            if (isSeeker && _wheelOpen) CloseWheel(confirm: false);
+
+            if (!_wheelOpen && !inputBusy && !isSeeker && Keyboard.current.rKey.wasPressedThisFrame)
             {
                 _wheelOpen = true;
                 _hoveredIndex = -1;

@@ -129,3 +129,34 @@ See `Docs/Goop_Build_Plan.md` for full milestone plan. Check items as completed.
       Hiders hear Seeker only via 3D taunt whistles, gun uses existing tag raycast + optional ammo
 - [ ] **USER ACTION NEEDED**: live 2-client run of full loop: lobby hangout -> pass gun -> Start ->
       Hide/Transition/Hunt -> PostRound -> back to lobby
+
+## M9 — Hitboxes/IK/stances + resilience + menu polish (2026-07-24)
+- [x] Mesh-accurate hitboxes: remote players' CharacterController capsules disabled — only the baked
+      mesh collider is hit by aim/paint rays; collider REBAKES on every pose change (0.35s post-transition)
+- [x] Seeker cannot use the pose wheel; stances = stand / crouch (Ctrl) / prone (X toggle, replicated
+      visual tilt, slow crawl, no jump)
+- [x] Gun rides the holder's hand.R bone (hip fallback), body-facing rotation
+- [x] AimIK: spine chain (Bone.001-004) bends to camera pitch + head/torso yaw offset (±65°), additive
+      world-space (Generic-rig safe), replicated Vector2, suppressed while posed/attached/dead
+- [x] Walking keeps pose (shuffle frozen); only Shift-run breaks it
+- [x] ConnectionWatchdog on NetworkManager: host quits/leaves, kick, transport failure -> tolerant session
+      leave + shutdown + MainMenu with reason banner
+- [x] Server: whole-team disconnect mid-round aborts to Resolution (no ghost rounds)
+- [x] MainMenu revamp: scene had NO camera (root cause of "weird") — added camera/light/stage backdrop,
+      3 posed colored GoopChar statues, restyled panel/title/buttons
+- [ ] **USER ACTION NEEDED**: fresh VP launch + test: shooting posed hiders (mesh hitbox), prone, gun in
+      hand, torso/head aim on remote players, host-quit while client in round
+
+## M10 — Paint mechanism deep-dive parity (2026-07-24)
+- [x] PaintStroke carries Metallic + Roughness bytes; painted into a second metallic-gloss texture
+      (URP Lit _MetallicGlossMap: R=metallic, A=smoothness) — sheen replicates like color does
+- [x] Palette: hue wheel + SV square + RGB sliders + HSV sliders + metallic/roughness sliders + brush
+      slider + 12 presets, all two-way synced with the eyedropper
+- [x] Per-map saved swatches (6 slots, PlayerPrefs keyed by scene; click empty=save, filled=load)
+- [x] Undo stroke / Clear all — server-side list ops (RemoveAt/Clear), all clients rebuild both textures
+      from the authoritative stroke list
+- [x] Cast-shadow toggle — ServerRpc-validated NetworkVariable, only ever flips shadowCastingMode On/Off
+- [x] Eyedropper anti-cheat: 0.25s rate limit + imperceptible ±2/255 sample jitter (Paint doc §5.5)
+- [x] Already in place from earlier: freehand UV strokes, instant local prediction + server-validated
+      stroke relay, MMB self-inspect orbit, feet frozen in paint mode, stroke cap 400
+- [ ] Deferred: interest management (don't replicate paint state until Seeker within range) — PRD 9

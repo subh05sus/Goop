@@ -132,6 +132,7 @@ GameObject:
   - component: {fileID: 217299993}
   - component: {fileID: 217299992}
   - component: {fileID: 217299996}
+  - component: {fileID: 217299997}
   m_Layer: 0
   m_Name: NetworkManager
   m_TagString: Untagged
@@ -253,6 +254,18 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Goop.Networking.BootstrapLoader
   firstScene: MainMenu
+--- !u!114 &217299997
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 217299991}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: aa2d1e0f888d2b341ad33c847c92f77d, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::Goop.Networking.ConnectionWatchdog
 --- !u!1 &1226632077
 GameObject:
   m_ObjectHideFlags: 0

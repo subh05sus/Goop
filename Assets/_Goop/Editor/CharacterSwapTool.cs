@@ -17,7 +17,10 @@ namespace Goop.EditorTools
     /// </summary>
     public static class CharacterSwapTool
     {
-        private const string FbxPath = "Assets/_Goop/Art/goop_character.fbx";
+        // Renamed from goop_character.fbx — the original path's Library/GUID entry got poisoned during
+        // the 2026-07-24 asset-database wedge (importer permanently null at that path); a fresh path
+        // forces a clean import.
+        private const string FbxPath = "Assets/_Goop/Art/GoopChar.fbx";
         private const string CtrlPath = "Assets/_Goop/Prefabs/GoopCharacterAnimator.controller";
         private const string PrefabPath = "Assets/_Goop/Prefabs/Player.prefab";
         private const string PreviewDir = "Assets/_Goop/Resources/PosePreviews";

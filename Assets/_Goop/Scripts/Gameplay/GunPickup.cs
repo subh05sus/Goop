@@ -52,20 +52,45 @@ namespace Goop.Gameplay
             HandleLocalInput();
         }
 
+        private Transform _cachedHand;
+        private ulong _cachedHandFor = NoHolder;
+
         private void UpdateVisualAttachment()
         {
             if (!HasHolder)
             {
                 transform.SetPositionAndRotation(_homePosition, _homeRotation);
+                _cachedHandFor = NoHolder;
+                _cachedHand = null;
                 return;
             }
 
             Transform holder = FindPlayerTransform(HolderClientId.Value);
             if (holder == null) return;
-            // Held at the right hip, pointing forward — readable from a distance.
-            transform.SetPositionAndRotation(
-                holder.position + holder.right * 0.4f + Vector3.up * 1.1f + holder.forward * 0.2f,
-                holder.rotation);
+
+            // Snap to the rig's right hand bone so the gun is always literally in-hand; the hip offset
+            // is only a fallback if the rig isn't spawned/found yet.
+            if (_cachedHandFor != HolderClientId.Value || _cachedHand == null)
+            {
+                _cachedHand = null;
+                foreach (var t in holder.GetComponentsInChildren<Transform>())
+                {
+                    if (t.name == "hand.R") { _cachedHand = t; break; }
+                }
+                _cachedHandFor = HolderClientId.Value;
+            }
+
+            if (_cachedHand != null)
+            {
+                // Body rotation (not the hand bone's raw rotation) keeps the barrel readable/forward.
+                transform.SetPositionAndRotation(_cachedHand.position, holder.rotation);
+            }
+            else
+            {
+                transform.SetPositionAndRotation(
+                    holder.position + holder.right * 0.4f + Vector3.up * 1.1f + holder.forward * 0.2f,
+                    holder.rotation);
+            }
         }
 
         private static Transform FindPlayerTransform(ulong clientId)

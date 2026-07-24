@@ -58,6 +58,15 @@ namespace Goop.Player
 
         public bool IsCrouching { get; private set; }
 
+        /// <summary>Prone: replicated so every client tilts the visual the same way. X toggles.</summary>
+        public NetworkVariable<bool> IsProne = new(
+            false,
+            writePerm: NetworkVariableWritePermission.Owner);
+
+        /// <summary>Camera angles exposed for AimIK (torso/head look direction).</summary>
+        public float CameraPitch => _pitch;
+        public float CameraYaw => _yaw;
+
         /// <summary>Exposed for the pause menu's sensitivity slider.</summary>
         public float LookSensitivity
         {
@@ -90,8 +99,15 @@ namespace Goop.Player
 
         public override void OnNetworkSpawn()
         {
+            IsProne.OnValueChanged += OnProneChanged;
+            ApplyProneVisual(IsProne.Value);
+
             if (!IsOwner)
             {
+                // Remote players must NOT present a capsule to raycasts/collisions — their hitbox is the
+                // baked mesh collider on the visual (pose-accurate). Position comes from NetworkTransform,
+                // so the CharacterController does nothing useful here anyway.
+                _controller.enabled = false;
                 enabled = false;
                 return;
             }
@@ -111,6 +127,7 @@ namespace Goop.Player
 
         public override void OnNetworkDespawn()
         {
+            IsProne.OnValueChanged -= OnProneChanged;
             if (!IsOwner) return;
             inputActions.FindActionMap("Player")?.Disable();
             Cursor.lockState = CursorLockMode.None;
@@ -201,7 +218,7 @@ namespace Goop.Player
                     transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, rotationSpeed * Time.deltaTime);
                 }
 
-                if (_jumpAction.WasPressedThisFrame() && _controller.isGrounded && !IsCrouching)
+                if (_jumpAction.WasPressedThisFrame() && _controller.isGrounded && !IsCrouching && !IsProne.Value)
                 {
                     _verticalVelocity.y = Mathf.Sqrt(2f * -gravity * jumpHeight);
                 }
@@ -213,13 +230,14 @@ namespace Goop.Player
             }
             _verticalVelocity.y += gravity * Time.deltaTime;
 
-            bool running = !inputBlocked && !frozen && !IsCrouching
+            bool running = !inputBlocked && !frozen && !IsCrouching && !IsProne.Value
                            && _sprintAction != null && _sprintAction.IsPressed();
-            float speed = IsCrouching ? crouchSpeed : (running ? runSpeed : moveSpeed);
+            float speed = IsProne.Value ? 1.2f : (IsCrouching ? crouchSpeed : (running ? runSpeed : moveSpeed));
             _controller.Move((moveDir * speed + _verticalVelocity) * Time.deltaTime);
 
-            // Walking out of a pose breaks it — the silhouette lock is for holding still.
-            if (moveDir.sqrMagnitude > 0.001f && _poseController != null
+            // Walking keeps the pose (you shuffle around frozen in the silhouette — no walk animation,
+            // the pose state ignores the Speed param). Only RUNNING (Shift) breaks the pose.
+            if (running && moveDir.sqrMagnitude > 0.001f && _poseController != null
                 && _poseController.PoseIndex.Value != Goop.Gameplay.PoseController.IdlePoseIndex)
             {
                 _poseController.SetPose(Goop.Gameplay.PoseController.IdlePoseIndex);
@@ -228,13 +246,43 @@ namespace Goop.Player
 
         private void HandleCrouch(bool inputBlocked)
         {
-            bool wantCrouch = !inputBlocked && _crouchAction.IsPressed();
-            if (wantCrouch == IsCrouching) return;
+            // X toggles prone (lowest stance, slowest). Ctrl-crouch is ignored while prone.
+            if (!inputBlocked && UnityEngine.InputSystem.Keyboard.current != null
+                && UnityEngine.InputSystem.Keyboard.current.xKey.wasPressedThisFrame)
+            {
+                IsProne.Value = !IsProne.Value;
+            }
 
-            IsCrouching = wantCrouch;
-            float height = IsCrouching ? crouchedHeight : standingHeight;
-            _controller.height = height;
-            _controller.center = new Vector3(0f, height * 0.5f, 0f);
+            bool wantCrouch = !inputBlocked && !IsProne.Value && _crouchAction.IsPressed();
+            if (wantCrouch != IsCrouching)
+            {
+                IsCrouching = wantCrouch;
+            }
+
+            float height = IsProne.Value ? 0.5f : (IsCrouching ? crouchedHeight : standingHeight);
+            if (!Mathf.Approximately(_controller.height, height))
+            {
+                _controller.height = height;
+                _controller.center = new Vector3(0f, height * 0.5f, 0f);
+            }
+        }
+
+        private void OnProneChanged(bool previous, bool current) => ApplyProneVisual(current);
+
+        /// <summary>Greybox prone visual: tilt the whole visual child face-down. Runs on every client
+        /// (driven by the replicated IsProne), no prone animation clip needed.</summary>
+        private void ApplyProneVisual(bool prone)
+        {
+            Transform visual = transform.Find("Visual_GoopGuy");
+            if (visual == null) return;
+            if (prone)
+            {
+                visual.SetLocalPositionAndRotation(new Vector3(0f, 0.35f, -0.4f), Quaternion.Euler(80f, 0f, 0f));
+            }
+            else
+            {
+                visual.SetLocalPositionAndRotation(Vector3.zero, Quaternion.identity);
+            }
         }
 
         /// <summary>Externally-driven camera orbit (paint mode middle-mouse drag).</summary>

@@ -40,6 +40,7 @@ namespace Goop.Gameplay
 
         private bool _endHuntEarly;
         private bool _matchRunning;
+        private bool _abortRound; // a whole team disconnected mid-round — skip straight to Resolution
 
         private void Awake()
         {
@@ -52,6 +53,7 @@ namespace Goop.Gameplay
 
             Phase.Value = GamePhase.LobbyIdle;
             NetworkManager.Singleton.OnClientConnectedCallback += OnClientConnected;
+            NetworkManager.Singleton.OnClientDisconnectCallback += OnClientDisconnected;
             StartCoroutine(PlaceInitialPlayers());
         }
 
@@ -60,6 +62,30 @@ namespace Goop.Gameplay
             if (IsServer && NetworkManager.Singleton != null)
             {
                 NetworkManager.Singleton.OnClientConnectedCallback -= OnClientConnected;
+                NetworkManager.Singleton.OnClientDisconnectCallback -= OnClientDisconnected;
+            }
+        }
+
+        /// <summary>If an entire side vanishes mid-round (Seeker rage-quits, last Hider drops), abort to
+        /// Resolution instead of letting a ghost round run its full timers.</summary>
+        private void OnClientDisconnected(ulong clientId)
+        {
+            if (!IsServer || !_matchRunning) return;
+            if (Phase.Value != GamePhase.Hide && Phase.Value != GamePhase.Transition && Phase.Value != GamePhase.Hunt) return;
+
+            bool anySeeker = false, anyHider = false;
+            foreach (var kvp in NetworkManager.Singleton.ConnectedClients)
+            {
+                if (kvp.Key == clientId || kvp.Value.PlayerObject == null) continue;
+                var netPlayer = kvp.Value.PlayerObject.GetComponent<NetworkPlayer>();
+                if (netPlayer.CurrentTeam.Value == Team.Seeker) anySeeker = true;
+                if (netPlayer.CurrentTeam.Value == Team.Hider && netPlayer.IsAlive.Value) anyHider = true;
+            }
+
+            if (!anySeeker || !anyHider)
+            {
+                Debug.LogWarning("[GameStateManager] A whole team disconnected — aborting round to Resolution.");
+                _abortRound = true;
             }
         }
 
@@ -125,6 +151,7 @@ namespace Goop.Gameplay
         private IEnumerator RunMatch()
         {
             _matchRunning = true;
+            _abortRound = false;
             ulong seekerClientId = GunPickup.Instance.HolderClientId.Value;
 
             AssignRoles(seekerClientId);
@@ -136,18 +163,24 @@ namespace Goop.Gameplay
             Phase.Value = GamePhase.Hide;
             Winner.Value = RoundWinner.None;
             Debug.Log("[GameStateManager] Phase -> Hide (Hiders on map, Seeker waiting in lobby)");
-            yield return CountDown(HideDuration.Value);
+            yield return CountDown(HideDuration.Value, () => _abortRound);
 
-            Phase.Value = GamePhase.Transition;
-            PhaseTimeRemaining.Value = transitionDuration;
-            Debug.Log("[GameStateManager] Phase -> Transition (the hunt begins...)");
-            yield return CountDown(transitionDuration);
-            TeleportTeamToSpawns(Team.Seeker, seekerSpawnPoints);
+            if (!_abortRound)
+            {
+                Phase.Value = GamePhase.Transition;
+                PhaseTimeRemaining.Value = transitionDuration;
+                Debug.Log("[GameStateManager] Phase -> Transition (the hunt begins...)");
+                yield return CountDown(transitionDuration, () => _abortRound);
+            }
 
-            Phase.Value = GamePhase.Hunt;
-            _endHuntEarly = false;
-            Debug.Log("[GameStateManager] Phase -> Hunt");
-            yield return CountDown(HuntDuration.Value, () => _endHuntEarly);
+            if (!_abortRound)
+            {
+                TeleportTeamToSpawns(Team.Seeker, seekerSpawnPoints);
+                Phase.Value = GamePhase.Hunt;
+                _endHuntEarly = false;
+                Debug.Log("[GameStateManager] Phase -> Hunt");
+                yield return CountDown(HuntDuration.Value, () => _endHuntEarly || _abortRound);
+            }
 
             Phase.Value = GamePhase.Resolution;
             Winner.Value = EvaluateWinner();

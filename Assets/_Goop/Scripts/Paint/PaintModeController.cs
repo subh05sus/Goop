@@ -26,6 +26,7 @@ namespace Goop.Paint
         private PaintableSkin _skin;
         private PlayerController _playerController;
         private PaletteUI _palette;
+        private LineRenderer _brushRing;
 
         private void Awake()
         {
@@ -80,8 +81,10 @@ namespace Goop.Paint
                 _playerController.OrbitCamera(Mouse.current.delta.ReadValue());
             }
 
-            // Eyedropper: Space samples whatever is under the cursor. Routed through the palette so the
-            // hue wheel jumps to the sampled color too.
+            UpdateBrushRing();
+
+            // Eyedropper: Space samples whatever is under the cursor; routed through the palette so the
+            // wheel follows the sample.
             if (Keyboard.current.spaceKey.wasPressedThisFrame)
             {
                 if (_skin.TrySampleWorldColor(Mouse.current.position.ReadValue(), out Color32 sampled))
@@ -92,10 +95,57 @@ namespace Goop.Paint
             }
         }
 
+        /// <summary>Brush-size preview: a ring hugging the mesh at the cursor, oriented perpendicular to
+        /// the surface normal, radius matching the brush footprint. Hidden when the cursor isn't on the
+        /// body or is over the palette.</summary>
+        private void UpdateBrushRing()
+        {
+            if (_brushRing == null) return;
+
+            RaycastHit hit = default;
+            bool show = !PaletteUI.PointerOverPaintUI
+                        && _skin.TryGetBrushPoint(Mouse.current.position.ReadValue(), out hit);
+            _brushRing.gameObject.SetActive(show);
+            if (!show) return;
+
+            // UV brush size -> approximate world radius: the UV atlas spans roughly the ~2m body,
+            // so world radius ≈ brushSize * 2. Close enough for an aiming aid.
+            float worldRadius = Mathf.Max(0.02f, _skin.BrushSize * 2f);
+            var t = _brushRing.transform;
+            t.SetPositionAndRotation(hit.point + hit.normal * 0.01f, Quaternion.LookRotation(hit.normal));
+            t.localScale = Vector3.one * worldRadius;
+            _brushRing.startColor = _brushRing.endColor = (Color)_skin.CurrentColor;
+        }
+
+        private void CreateBrushRing()
+        {
+            var go = new GameObject("BrushRing");
+            go.transform.SetParent(null);
+            _brushRing = go.AddComponent<LineRenderer>();
+            _brushRing.loop = true;
+            _brushRing.useWorldSpace = false;
+            _brushRing.widthMultiplier = 0.012f;
+            Shader unlit = Shader.Find("Universal Render Pipeline/Unlit");
+            _brushRing.material = unlit != null ? new Material(unlit) : new Material(Shader.Find("Sprites/Default"));
+            _brushRing.material.color = Color.white;
+
+            const int segments = 40;
+            _brushRing.positionCount = segments;
+            for (int i = 0; i < segments; i++)
+            {
+                float a = i / (float)segments * Mathf.PI * 2f;
+                // Circle in local XY — LookRotation(normal) makes local Z the surface normal, so the
+                // ring lies flat on (perpendicular to) the surface.
+                _brushRing.SetPosition(i, new Vector3(Mathf.Cos(a), Mathf.Sin(a), 0f));
+            }
+            go.SetActive(false);
+        }
+
         private void EnterPaintMode()
         {
             InPaintMode = true;
             _skin.PaintingEnabled = true;
+            if (_brushRing == null) CreateBrushRing();
             if (_palette != null) _palette.Visible = true;
             if (_playerController != null)
             {
@@ -108,6 +158,7 @@ namespace Goop.Paint
         {
             InPaintMode = false;
             _skin.PaintingEnabled = false;
+            if (_brushRing != null) _brushRing.gameObject.SetActive(false);
             if (_palette != null) _palette.Visible = false;
             if (_playerController != null)
             {
@@ -119,6 +170,7 @@ namespace Goop.Paint
         public override void OnNetworkDespawn()
         {
             if (IsOwner && InPaintMode) ExitPaintMode();
+            if (_brushRing != null) Destroy(_brushRing.gameObject);
         }
     }
 }

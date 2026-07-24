@@ -453,3 +453,10 @@ on every shot. Fixed with RaycastAll + skip-own-root + first-non-self-hit-decide
 world = blocked). Server LOS re-check got the same treatment (skips both shooter's and target's own
 colliders instead of a fragile single-hit comparison). Standing rule: ANY center-screen ray from a
 third-person camera must skip the local player's colliders first.
+
+## 2026-07-24 — NetworkList defaults to Server write permission
+"|Client-1|Visual_GoopGuy|Strokes| Write permissions (Server) for this client instance is not allowed!"
+NetworkVariable fields all had writePerm passed explicitly, but the Strokes NetworkList used `new()` —
+and NetworkList's default writePerm is Server. Host-as-owner masked it (host IS the server); real clients
+were rejected on every stroke. Rule: ALWAYS pass writePerm explicitly on NetworkList too:
+`new NetworkList<T>(writePerm: NetworkVariableWritePermission.Owner)`.

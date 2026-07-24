@@ -26,6 +26,14 @@ namespace Goop.UI
             if (NetworkManager.Singleton == null)
             {
                 SceneManager.LoadScene("Bootstrap", LoadSceneMode.Single);
+                return;
+            }
+
+            // Landed here because a session died (host left, transport failure)? Tell the player why.
+            if (!string.IsNullOrEmpty(Goop.Networking.ConnectionWatchdog.LastDisconnectReason))
+            {
+                SetStatus(Goop.Networking.ConnectionWatchdog.LastDisconnectReason);
+                Goop.Networking.ConnectionWatchdog.LastDisconnectReason = null;
             }
         }
 
