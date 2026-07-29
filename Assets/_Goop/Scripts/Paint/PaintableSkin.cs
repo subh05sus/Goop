@@ -24,8 +24,9 @@ namespace Goop.Paint
         [SerializeField] private float brushSize = 0.03f;
         [SerializeField] private InputActionAsset inputActions;
         // Subdivision levels for the paint mesh: each level ×4 triangles, making vertex paint sharp and
-        // cursor-accurate (the base mesh's triangles are too big — paint interpolates = blur). 2 = ×16.
-        [SerializeField] private int paintSubdivisions = 2;
+        // cursor-accurate (the base mesh's triangles are too big — paint interpolates = blur).
+        // 3 = ×64 (~2.5k -> ~100k verts): crisp. Dial down if perf suffers with many players.
+        [SerializeField] private int paintSubdivisions = 3;
 
         public readonly NetworkList<PaintStroke> Strokes = new();
 
@@ -121,7 +122,7 @@ namespace Goop.Paint
         {
             // Per-instance, SUBDIVIDED mesh copy: dense verts = sharp vertex paint. Collider + baked verts
             // downstream all derive from this same mesh, so raycasts and paint stay aligned.
-            _renderMesh = Subdivide(_renderer.sharedMesh, Mathf.Clamp(paintSubdivisions, 0, 3));
+            _renderMesh = Subdivide(_renderer.sharedMesh, Mathf.Clamp(paintSubdivisions, 0, 4));
             _renderer.sharedMesh = _renderMesh;
 
             int n = _renderMesh.vertexCount;
