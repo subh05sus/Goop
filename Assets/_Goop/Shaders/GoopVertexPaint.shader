@@ -64,23 +64,41 @@ Shader "Goop/VertexPaintLit"
 
             half4 frag(Varyings IN) : SV_Target
             {
-                SurfaceData s = (SurfaceData)0;
-                s.albedo     = IN.color.rgb;
-                s.metallic   = saturate(IN.mr.x);
-                s.smoothness = saturate(IN.mr.y);
-                s.occlusion  = 1.0;
-                s.alpha      = 1.0;
+                half3 albedo     = IN.color.rgb;
+                half  metallic   = saturate(IN.mr.x);
+                half  smoothness = saturate(IN.mr.y);
+                half3 normalWS   = normalize(IN.normalWS);
+                half3 viewDir    = GetWorldSpaceNormalizeViewDir(IN.positionWS);
 
-                InputData d = (InputData)0;
-                d.positionWS      = IN.positionWS;
-                d.normalWS        = normalize(IN.normalWS);
-                d.viewDirectionWS = GetWorldSpaceNormalizeViewDir(IN.positionWS);
-                d.shadowCoord     = TransformWorldToShadowCoord(IN.positionWS);
-                d.fogCoord        = IN.fogCoord;
+                float4 shadowCoord = TransformWorldToShadowCoord(IN.positionWS);
+                Light mainLight = GetMainLight(shadowCoord);
 
-                half4 col = UniversalFragmentPBR(d, s);
-                col.rgb = MixFog(col.rgb, IN.fogCoord);
-                return col;
+                half3 ambient = SampleSH(normalWS);
+                half  ndotl   = saturate(dot(normalWS, mainLight.direction));
+                half3 diffuse = mainLight.color * (ndotl * mainLight.shadowAttenuation);
+
+                // Cheap Blinn-Phong sheen, scaled by smoothness; metallic tints it toward the albedo.
+                half3 hvec    = normalize(mainLight.direction + viewDir);
+                half  specPow = lerp(8.0, 128.0, smoothness);
+                half  spec    = pow(saturate(dot(normalWS, hvec)), specPow) * smoothness;
+                half3 specCol = lerp(half3(1,1,1), albedo, metallic);
+                half3 specular = mainLight.color * (spec * mainLight.shadowAttenuation) * specCol;
+
+                half3 addDiffuse = 0;
+            #ifdef _ADDITIONAL_LIGHTS
+                uint lc = GetAdditionalLightsCount();
+                for (uint li = 0u; li < lc; li++)
+                {
+                    Light l = GetAdditionalLight(li, IN.positionWS);
+                    addDiffuse += l.color * (saturate(dot(normalWS, l.direction)) * l.distanceAttenuation * l.shadowAttenuation);
+                }
+            #endif
+
+                // Ambient floor guarantees the surface is never pure black even with no scene light.
+                half3 lighting = max(ambient + diffuse + addDiffuse, half3(0.18, 0.18, 0.18));
+                half3 col = albedo * lighting + specular;
+                col = MixFog(col, IN.fogCoord);
+                return half4(col, 1.0);
             }
             ENDHLSL
         }

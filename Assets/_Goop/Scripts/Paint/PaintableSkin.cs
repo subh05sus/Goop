@@ -77,6 +77,12 @@ namespace Goop.Paint
             _poseController = GetComponent<Goop.Gameplay.PoseController>();
             if (_poseController != null)
                 _poseController.PoseIndex.OnValueChanged += OnPoseChangedRebake;
+
+            if (IsOwner)
+            {
+                var palette = GetComponent<Goop.UI.PaletteUI>();
+                if (palette != null) palette.Initialize(this);
+            }
         }
 
         public override void OnNetworkDespawn()
