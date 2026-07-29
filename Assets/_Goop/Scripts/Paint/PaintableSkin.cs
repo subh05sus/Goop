@@ -1,4 +1,3 @@
-using Goop.UI;
 using Unity.Netcode;
 using UnityEngine;
 using UnityEngine.InputSystem;
@@ -6,16 +5,15 @@ using UnityEngine.InputSystem;
 namespace Goop.Paint
 {
     /// <summary>
-    /// Per-player paintable skin (PRD 7.1 + Paint doc). Freehand strokes carry color AND material params
-    /// (metallic/roughness -> metallic-gloss map). Painting is done by TRUE 3D SURFACE DISTANCE, not UV
-    /// distance: a UV->local-position map is baked from the mesh, and a dab paints every texel whose
-    /// surface point is within the brush's world radius of the hit point. This is why one dab no longer
-    /// floods a whole UV island (the torso is packed into a small, dense UV region — a UV-space disc there
-    /// covered the entire torso; a 3D-distance disc does not).
+    /// Per-player paintable skin — VERTEX-COLOR painting (PRD 7.1 + Paint doc), chosen because the model's
+    /// body UVs are a thin, stretched strip that made texture painting read faded/streaked. Vertex painting
+    /// ignores UVs entirely: a dab colors every vertex within the brush's 3D radius of the hit point, and a
+    /// custom URP shader (Goop/VertexPaintLit) renders per-vertex color + metallic/smoothness. Resolution is
+    /// the mesh's vertex density, so every body region paints evenly.
     ///
-    /// Local input paints instantly (prediction); the server validates + appends each stroke to a
-    /// server-write NetworkList that replicates to everyone (incl. late joiners). Undo/Clear rebuild from
-    /// the list. Cast-shadow is a server-validated toggle (only ever On/Off).
+    /// Painting predicts locally, then the server validates + appends each stroke to a server-write
+    /// NetworkList that replicates to everyone (incl. late joiners). Undo/Clear rebuild from the list.
+    /// CastShadows is a server-validated toggle (only ever On/Off).
     /// </summary>
     [RequireComponent(typeof(Animator))]
     public class PaintableSkin : NetworkBehaviour
@@ -23,8 +21,7 @@ namespace Goop.Paint
         private const float MaxBrushSize = 0.15f;   // fraction of the mesh bounds diagonal
         private const float DefaultSmoothness = 0.35f;
 
-        [SerializeField] private int textureSize = 512;
-        [SerializeField] private float brushSize = 0.02f;
+        [SerializeField] private float brushSize = 0.03f;
         [SerializeField] private InputActionAsset inputActions;
 
         public readonly NetworkList<PaintStroke> Strokes = new();
@@ -47,35 +44,31 @@ namespace Goop.Paint
 
         public float MaxBrush => MaxBrushSize;
 
-        /// <summary>World-space radius of the current brush — used by the preview ring.</summary>
         public float WorldBrushRadius => brushSize * _worldBoundsDiag;
 
         private SkinnedMeshRenderer _renderer;
         private MeshCollider _collider;
         private Goop.Gameplay.PoseController _poseController;
-        private Texture2D _paintTexture;
-        private Texture2D _metallicTexture;
-        private Color32[] _colorPixels;
-        private Color32[] _metalPixels;
-        private bool _textureDirty;
 
-        // UV -> baked-local surface position map (built from the baked mesh). Painting tests distance
-        // against these, so it's independent of how the UVs are packed.
-        private Vector3[] _positionMap;
-        private bool[] _covered;
-        private float _localBoundsDiag = 1f;  // baked (unscaled) diagonal — brush radius unit
-        private float _worldBoundsDiag = 1f;  // rendered world diagonal — for the preview ring
+        private Mesh _renderMesh;            // per-instance copy we write vertex colors into
+        private Color32[] _colors;           // per-vertex albedo
+        private Vector2[] _mr;               // per-vertex (metallic, smoothness)
+        private Vector3[] _bakedVerts;       // current-pose vertex positions (baked-local), for proximity
+        private bool _meshDirty;
+
+        private float _localBoundsDiag = 1f;
+        private float _worldBoundsDiag = 1f;
 
         private Camera OwnerCamera => Camera.main;
 
         public override void OnNetworkSpawn()
         {
             _renderer = GetComponentInChildren<SkinnedMeshRenderer>();
-            SetupPaintTexture();
+            SetupRenderMesh();
             SetupCollider();
-            BuildPositionMap();
+            RefreshBakedVerts();
 
-            RebuildTexturesFromList();
+            RebuildFromList();
 
             Strokes.OnListChanged += OnStrokesChanged;
             CastShadows.OnValueChanged += OnCastShadowsChanged;
@@ -83,15 +76,7 @@ namespace Goop.Paint
 
             _poseController = GetComponent<Goop.Gameplay.PoseController>();
             if (_poseController != null)
-            {
                 _poseController.PoseIndex.OnValueChanged += OnPoseChangedRebake;
-            }
-
-            if (IsOwner)
-            {
-                var palette = GetComponent<PaletteUI>();
-                if (palette != null) palette.Initialize(this);
-            }
         }
 
         public override void OnNetworkDespawn()
@@ -99,9 +84,7 @@ namespace Goop.Paint
             Strokes.OnListChanged -= OnStrokesChanged;
             CastShadows.OnValueChanged -= OnCastShadowsChanged;
             if (_poseController != null)
-            {
                 _poseController.PoseIndex.OnValueChanged -= OnPoseChangedRebake;
-            }
         }
 
         private void OnCastShadowsChanged(bool previous, bool current)
@@ -122,63 +105,43 @@ namespace Goop.Paint
         {
             yield return new WaitForSeconds(0.35f);
             RebakeCollider();
-            BuildPositionMap();
+            RefreshBakedVerts();
         }
 
-        /// <summary>Re-snapshot the skinned mesh into the collider so the hitbox matches the CURRENT
-        /// silhouette.</summary>
-        public void RebakeCollider()
+        private void SetupRenderMesh()
         {
-            if (_renderer == null || _collider == null) return;
-            var baked = new Mesh();
-            _renderer.BakeMesh(baked, true);
-            var old = _collider.sharedMesh;
-            _collider.sharedMesh = baked;
-            if (old != null) Destroy(old);
+            // Per-instance mesh copy so we can write vertex colors without touching the shared asset.
+            _renderMesh = Instantiate(_renderer.sharedMesh);
+            _renderer.sharedMesh = _renderMesh;
+
+            int n = _renderMesh.vertexCount;
+            _colors = new Color32[n];
+            _mr = new Vector2[n];
+            ResetVertexData();
+
+            Shader sh = Shader.Find("Goop/VertexPaintLit");
+            Material mat = sh != null ? new Material(sh) : new Material(Shader.Find("Universal Render Pipeline/Lit"));
+            _renderer.material = mat;
+
+            _localBoundsDiag = Mathf.Max(0.0001f, _renderMesh.bounds.size.magnitude);
+            _worldBoundsDiag = Mathf.Max(0.0001f, _renderer.bounds.size.magnitude);
         }
 
-        private void SetupPaintTexture()
-        {
-            _paintTexture = new Texture2D(textureSize, textureSize, TextureFormat.RGBA32, false)
-            {
-                wrapMode = TextureWrapMode.Clamp
-            };
-            _metallicTexture = new Texture2D(textureSize, textureSize, TextureFormat.RGBA32, false)
-            {
-                wrapMode = TextureWrapMode.Clamp
-            };
-            _colorPixels = new Color32[textureSize * textureSize];
-            _metalPixels = new Color32[textureSize * textureSize];
-            ResetTexturePixels();
-
-            Shader lit = Shader.Find("Universal Render Pipeline/Lit");
-            Material materialInstance = lit != null ? new Material(lit) : new Material(_renderer.sharedMaterial);
-            materialInstance.color = Color.white;
-            if (materialInstance.HasProperty("_BaseMap")) materialInstance.SetTexture("_BaseMap", _paintTexture);
-            else materialInstance.mainTexture = _paintTexture;
-            if (materialInstance.HasProperty("_MetallicGlossMap"))
-            {
-                materialInstance.SetTexture("_MetallicGlossMap", _metallicTexture);
-                materialInstance.EnableKeyword("_METALLICSPECGLOSSMAP");
-                if (materialInstance.HasProperty("_GlossMapScale")) materialInstance.SetFloat("_GlossMapScale", 1f);
-                if (materialInstance.HasProperty("_Smoothness")) materialInstance.SetFloat("_Smoothness", 1f);
-            }
-            _renderer.material = materialInstance;
-        }
-
-        private void ResetTexturePixels()
+        private void ResetVertexData()
         {
             Color32 white = new(255, 255, 255, 255);
-            Color32 defaultMetal = new(0, 0, 0, (byte)(DefaultSmoothness * 255f));
-            for (int i = 0; i < _colorPixels.Length; i++)
+            for (int i = 0; i < _colors.Length; i++)
             {
-                _colorPixels[i] = white;
-                _metalPixels[i] = defaultMetal;
+                _colors[i] = white;
+                _mr[i] = new Vector2(0f, DefaultSmoothness);
             }
-            _paintTexture.SetPixels32(_colorPixels);
-            _metallicTexture.SetPixels32(_metalPixels);
-            _paintTexture.Apply();
-            _metallicTexture.Apply();
+            UploadVertexData();
+        }
+
+        private void UploadVertexData()
+        {
+            _renderMesh.colors32 = _colors;
+            _renderMesh.SetUVs(1, new System.Collections.Generic.List<Vector2>(_mr));
         }
 
         private void SetupCollider()
@@ -190,77 +153,32 @@ namespace Goop.Paint
             _collider.sharedMesh = bakedMesh;
         }
 
-        /// <summary>Rasterize the baked mesh into UV space, storing each texel's baked-local surface
-        /// position. Built identically on every client (same mesh + UVs), so a stroke's UV resolves to the
-        /// same surface point everywhere — deterministic replication with no extra network data.</summary>
-        private void BuildPositionMap()
+        public void RebakeCollider()
         {
-            var mesh = _collider != null ? _collider.sharedMesh : null;
-            if (mesh == null) return;
-
-            _localBoundsDiag = Mathf.Max(0.0001f, mesh.bounds.size.magnitude);
-            _worldBoundsDiag = Mathf.Max(0.0001f, _renderer.bounds.size.magnitude);
-
-            int n = textureSize * textureSize;
-            if (_positionMap == null || _positionMap.Length != n)
-            {
-                _positionMap = new Vector3[n];
-                _covered = new bool[n];
-            }
-            System.Array.Clear(_covered, 0, n);
-
-            Vector3[] verts = mesh.vertices;
-            Vector2[] uvs = mesh.uv;
-            int[] tris = mesh.triangles;
-            if (uvs == null || uvs.Length != verts.Length) return;
-
-            for (int t = 0; t < tris.Length; t += 3)
-            {
-                RasterizeTriangle(
-                    uvs[tris[t]], uvs[tris[t + 1]], uvs[tris[t + 2]],
-                    verts[tris[t]], verts[tris[t + 1]], verts[tris[t + 2]]);
-            }
+            if (_renderer == null || _collider == null) return;
+            var baked = new Mesh();
+            _renderer.BakeMesh(baked, true);
+            var old = _collider.sharedMesh;
+            _collider.sharedMesh = baked;
+            if (old != null) Destroy(old);
         }
 
-        private void RasterizeTriangle(Vector2 uv0, Vector2 uv1, Vector2 uv2, Vector3 p0, Vector3 p1, Vector3 p2)
+        /// <summary>Snapshot the current-pose vertex positions (baked-local, unscaled) so painting finds
+        /// vertices by their real 3D location in the pose the player is actually in.</summary>
+        private void RefreshBakedVerts()
         {
-            // UV -> pixel space
-            Vector2 a = uv0 * textureSize, b = uv1 * textureSize, c = uv2 * textureSize;
-            int minX = Mathf.Clamp(Mathf.FloorToInt(Mathf.Min(a.x, b.x, c.x)), 0, textureSize - 1);
-            int maxX = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(a.x, b.x, c.x)), 0, textureSize - 1);
-            int minY = Mathf.Clamp(Mathf.FloorToInt(Mathf.Min(a.y, b.y, c.y)), 0, textureSize - 1);
-            int maxY = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(a.y, b.y, c.y)), 0, textureSize - 1);
-
-            float denom = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
-            if (Mathf.Abs(denom) < 1e-9f) return;
-
-            for (int y = minY; y <= maxY; y++)
-            {
-                for (int x = minX; x <= maxX; x++)
-                {
-                    float px = x + 0.5f, py = y + 0.5f;
-                    float w0 = ((b.y - c.y) * (px - c.x) + (c.x - b.x) * (py - c.y)) / denom;
-                    float w1 = ((c.y - a.y) * (px - c.x) + (a.x - c.x) * (py - c.y)) / denom;
-                    float w2 = 1f - w0 - w1;
-                    // Small epsilon so shared triangle edges don't leave seam gaps.
-                    if (w0 < -0.01f || w1 < -0.01f || w2 < -0.01f) continue;
-
-                    int idx = y * textureSize + x;
-                    _positionMap[idx] = w0 * p0 + w1 * p1 + w2 * p2;
-                    _covered[idx] = true;
-                }
-            }
+            if (_collider == null || _collider.sharedMesh == null) return;
+            _bakedVerts = _collider.sharedMesh.vertices;
+            _localBoundsDiag = Mathf.Max(0.0001f, _collider.sharedMesh.bounds.size.magnitude);
+            _worldBoundsDiag = Mathf.Max(0.0001f, _renderer.bounds.size.magnitude);
         }
 
         private void Update()
         {
-            if (_textureDirty)
+            if (_meshDirty)
             {
-                _paintTexture.SetPixels32(_colorPixels);
-                _paintTexture.Apply();
-                _metallicTexture.SetPixels32(_metalPixels);
-                _metallicTexture.Apply();
-                _textureDirty = false;
+                UploadVertexData();
+                _meshDirty = false;
             }
 
             if (!IsOwner || !PaintingEnabled) return;
@@ -268,13 +186,13 @@ namespace Goop.Paint
             if (Mouse.current == null) return;
             if (!Mouse.current.leftButton.isPressed)
             {
-                _lastDabUV = new Vector2(-10f, -10f);
+                _lastCenter = new Vector3(-999, -999, -999);
                 return;
             }
             TryPaintAtPointer();
         }
 
-        private Vector2 _lastDabUV = new(-10f, -10f);
+        private Vector3 _lastCenter = new(-999, -999, -999);
 
         /// <summary>Raycast the cursor against this skin's own collider (painting + preview ring).</summary>
         public bool TryGetBrushPoint(Vector2 screenPos, out RaycastHit hit)
@@ -292,15 +210,19 @@ namespace Goop.Paint
             Vector2 screenPos = Mouse.current.position.ReadValue();
             if (!TryGetBrushPoint(screenPos, out RaycastHit hit)) return;
 
-            Vector2 uv = hit.textureCoord;
-            // Distance-space dabs in UV so a held drag draws a line without thousands of dabs.
-            if (Vector2.Distance(uv, _lastDabUV) < brushSize * 0.35f) return;
-            _lastDabUV = uv;
+            // Convert the world hit point into baked-local space (the space _bakedVerts live in).
+            Vector3 centerLocal = _renderer.transform.InverseTransformPoint(hit.point);
+
+            // Distance-space dabs so a held drag paints a line without spamming strokes.
+            float spacing = brushSize * _localBoundsDiag * 0.4f;
+            if ((centerLocal - _lastCenter).sqrMagnitude < spacing * spacing) return;
+            _lastCenter = centerLocal;
 
             var stroke = new PaintStroke
             {
-                U = uv.x,
-                V = uv.y,
+                Cx = centerLocal.x,
+                Cy = centerLocal.y,
+                Cz = centerLocal.z,
                 BrushSize = brushSize,
                 R = CurrentColor.r,
                 G = CurrentColor.g,
@@ -309,15 +231,14 @@ namespace Goop.Paint
                 Roughness = (byte)Mathf.RoundToInt(Mathf.Clamp01(CurrentRoughness) * 255f)
             };
 
-            ApplyStrokeToTexture(stroke);   // instant local prediction
-            _textureDirty = true;
+            ApplyStroke(stroke);   // local prediction
+            _meshDirty = true;
             SubmitStrokeServerRpc(stroke);
         }
 
         [ServerRpc]
         private void SubmitStrokeServerRpc(PaintStroke stroke)
         {
-            if (stroke.U < 0f || stroke.U > 1f || stroke.V < 0f || stroke.V > 1f) return;
             stroke.BrushSize = Mathf.Clamp(stroke.BrushSize, 0.005f, MaxBrushSize);
             Strokes.Add(stroke);
         }
@@ -339,10 +260,21 @@ namespace Goop.Paint
         [ServerRpc]
         private void SetShadowServerRpc(bool cast) => CastShadows.Value = cast;
 
-        public Color32 SampleTexture(Vector2 uv) => _paintTexture.GetPixelBilinear(uv.x, uv.y);
+        /// <summary>Sample the painted color at the vertex nearest a surface hit (eyedropper on players).</summary>
+        public Color32 SampleAtLocalPoint(Vector3 localPoint)
+        {
+            if (_bakedVerts == null) return CurrentColor;
+            int best = -1; float bd = float.MaxValue;
+            for (int i = 0; i < _bakedVerts.Length; i++)
+            {
+                float d = (_bakedVerts[i] - localPoint).sqrMagnitude;
+                if (d < bd) { bd = d; best = i; }
+            }
+            return best >= 0 ? _colors[best] : (Color32)CurrentColor;
+        }
 
-        /// <summary>3D eyedropper: sample the surface under the cursor. Walks all hits, skips own non-mesh
-        /// colliders. Paintable bodies sample their live texture; world geometry samples its material.</summary>
+        /// <summary>3D eyedropper: sample the surface under the cursor. Paintable bodies return the painted
+        /// vertex color; world geometry returns its material color.</summary>
         public bool TrySampleWorldColor(Vector2 screenPos, out Color32 sampled)
         {
             sampled = default;
@@ -360,7 +292,8 @@ namespace Goop.Paint
                 {
                     if (hit.collider is MeshCollider)
                     {
-                        sampled = paintable.SampleTexture(hit.textureCoord);
+                        Vector3 lp = paintable._renderer.transform.InverseTransformPoint(hit.point);
+                        sampled = paintable.SampleAtLocalPoint(lp);
                         return true;
                     }
                     continue;
@@ -385,135 +318,58 @@ namespace Goop.Paint
             if (change.Type == NetworkListEvent<PaintStroke>.EventType.Add)
             {
                 if (IsOwner) return; // owner already predicted this stroke locally
-                ApplyStrokeToTexture(change.Value);
-                _textureDirty = true;
+                ApplyStroke(change.Value);
+                _meshDirty = true;
                 return;
             }
-            RebuildTexturesFromList();
+            RebuildFromList();
         }
 
-        private void RebuildTexturesFromList()
+        private void RebuildFromList()
         {
-            ResetPixelBuffers();
-            foreach (var stroke in Strokes) PaintDab(stroke);
-            _textureDirty = true;
+            ResetVertexDataArraysOnly();
+            foreach (var stroke in Strokes) ApplyStroke(stroke);
+            _meshDirty = true;
         }
 
-        private void ResetPixelBuffers()
+        private void ResetVertexDataArraysOnly()
         {
             Color32 white = new(255, 255, 255, 255);
-            Color32 defaultMetal = new(0, 0, 0, (byte)(DefaultSmoothness * 255f));
-            for (int i = 0; i < _colorPixels.Length; i++)
+            for (int i = 0; i < _colors.Length; i++)
             {
-                _colorPixels[i] = white;
-                _metalPixels[i] = defaultMetal;
-            }
-        }
-
-        private void ApplyStrokeToTexture(PaintStroke stroke) => PaintDab(stroke);
-
-        /// <summary>Paint one dab by TRUE surface distance: resolve the stroke UV to a baked-local surface
-        /// point, then color every covered texel whose surface point is within the brush's local radius.
-        /// UV packing is irrelevant — a dense island (torso) and a loose island (head) get the same
-        /// physical brush footprint.</summary>
-        private void PaintDab(PaintStroke stroke)
-        {
-            if (_positionMap == null || _covered == null) return;
-
-            int cx = Mathf.Clamp(Mathf.RoundToInt(stroke.U * textureSize), 0, textureSize - 1);
-            int cy = Mathf.Clamp(Mathf.RoundToInt(stroke.V * textureSize), 0, textureSize - 1);
-
-            Vector3 centerPos = FindCoveredPosition(cx, cy, out bool ok);
-            if (!ok) return;
-
-            float brush = Mathf.Clamp(stroke.BrushSize, 0.005f, MaxBrushSize);
-            float radiusLocal = brush * _localBoundsDiag;
-            float radiusSqr = radiusLocal * radiusLocal;
-
-            Color32 color = new(stroke.R, stroke.G, stroke.B, 255);
-            Color32 metal = new(stroke.Metallic, 0, 0, (byte)(255 - stroke.Roughness));
-
-            // Bound the pixel window by an estimated texel density so we don't scan the whole texture per
-            // dab, then reject by true 3D distance inside it. Density is estimated from the neighborhood
-            // of the center texel; a generous multiplier plus the 3D test keeps it correct even if the
-            // estimate is rough.
-            int window = EstimatePixelWindow(cx, cy, centerPos, radiusLocal);
-            int minX = Mathf.Max(0, cx - window), maxX = Mathf.Min(textureSize - 1, cx + window);
-            int minY = Mathf.Max(0, cy - window), maxY = Mathf.Min(textureSize - 1, cy + window);
-
-            int painted = 0;
-            for (int y = minY; y <= maxY; y++)
-            {
-                int row = y * textureSize;
-                for (int x = minX; x <= maxX; x++)
-                {
-                    int idx = row + x;
-                    if (!_covered[idx]) continue;
-                    if ((_positionMap[idx] - centerPos).sqrMagnitude > radiusSqr) continue;
-                    _colorPixels[idx] = color;
-                    _metalPixels[idx] = metal;
-                    painted++;
-                }
-            }
-
-            // Diagnostic (owner, first few dabs): proves the real runtime footprint. If this logs a small
-            // number but the whole torso still visibly fills, the instance is running stale code.
-            if (IsOwner && _dabDebugCount < 6)
-            {
-                _dabDebugCount++;
-                int coveredTotal = 0;
-                for (int i = 0; i < _covered.Length; i++) if (_covered[i]) coveredTotal++;
-                Debug.Log($"[PaintDab] painted {painted} texels ({(coveredTotal > 0 ? 100f * painted / coveredTotal : 0):F1}% of body) at uv=({stroke.U:F2},{stroke.V:F2}) brush={brush:F3}");
+                _colors[i] = white;
+                _mr[i] = new Vector2(0f, DefaultSmoothness);
             }
         }
 
         private int _dabDebugCount;
 
-        private Vector3 FindCoveredPosition(int cx, int cy, out bool ok)
+        /// <summary>Color every vertex within the brush's 3D radius of the stroke center. UV layout is
+        /// irrelevant — this is pure geometry.</summary>
+        private void ApplyStroke(PaintStroke stroke)
         {
-            int centerIdx = cy * textureSize + cx;
-            if (_covered[centerIdx]) { ok = true; return _positionMap[centerIdx]; }
+            if (_bakedVerts == null || _colors == null) return;
 
-            // UV landed in a tiny gap between islands — search a small ring for the nearest covered texel.
-            for (int r = 1; r <= 3; r++)
-            {
-                for (int dy = -r; dy <= r; dy++)
-                {
-                    int y = cy + dy;
-                    if (y < 0 || y >= textureSize) continue;
-                    for (int dx = -r; dx <= r; dx++)
-                    {
-                        int x = cx + dx;
-                        if (x < 0 || x >= textureSize) continue;
-                        int idx = y * textureSize + x;
-                        if (_covered[idx]) { ok = true; return _positionMap[idx]; }
-                    }
-                }
-            }
-            ok = false;
-            return Vector3.zero;
-        }
+            Vector3 center = new(stroke.Cx, stroke.Cy, stroke.Cz);
+            float radius = Mathf.Clamp(stroke.BrushSize, 0.005f, MaxBrushSize) * _localBoundsDiag;
+            float rs = radius * radius;
+            Color32 color = new(stroke.R, stroke.G, stroke.B, 255);
+            Vector2 mr = new(stroke.Metallic / 255f, 1f - stroke.Roughness / 255f);
 
-        /// <summary>Estimate how many texels the brush radius spans, from local texel density near the
-        /// center. Capped so a bad estimate can't blow up into a full-texture scan.</summary>
-        private int EstimatePixelWindow(int cx, int cy, Vector3 centerPos, float radiusLocal)
-        {
-            float bestStep = float.MaxValue;
-            // Distance in local space to an adjacent covered texel = local units per texel.
-            int[] dxs = { 1, -1, 0, 0 };
-            int[] dys = { 0, 0, 1, -1 };
-            for (int k = 0; k < 4; k++)
+            int painted = 0;
+            for (int i = 0; i < _bakedVerts.Length; i++)
             {
-                int x = cx + dxs[k], y = cy + dys[k];
-                if (x < 0 || x >= textureSize || y < 0 || y >= textureSize) continue;
-                int idx = y * textureSize + x;
-                if (!_covered[idx]) continue;
-                float d = (_positionMap[idx] - centerPos).magnitude;
-                if (d > 1e-6f && d < bestStep) bestStep = d;
+                if ((_bakedVerts[i] - center).sqrMagnitude > rs) continue;
+                _colors[i] = color;
+                _mr[i] = mr;
+                painted++;
             }
-            if (bestStep >= float.MaxValue) return 24; // no neighbor info — modest default
-            int window = Mathf.CeilToInt(radiusLocal / bestStep) + 2;
-            return Mathf.Clamp(window, 2, 96);
+
+            if (IsOwner && _dabDebugCount < 4)
+            {
+                _dabDebugCount++;
+                Debug.Log($"[PaintDab-vtx] painted {painted}/{_bakedVerts.Length} verts, brush={stroke.BrushSize:F3} radiusLocal={radius:F5}");
+            }
         }
     }
 }
