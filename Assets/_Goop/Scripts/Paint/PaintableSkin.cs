@@ -23,6 +23,9 @@ namespace Goop.Paint
 
         [SerializeField] private float brushSize = 0.03f;
         [SerializeField] private InputActionAsset inputActions;
+        // Subdivision levels for the paint mesh: each level ×4 triangles, making vertex paint sharp and
+        // cursor-accurate (the base mesh's triangles are too big — paint interpolates = blur). 2 = ×16.
+        [SerializeField] private int paintSubdivisions = 2;
 
         public readonly NetworkList<PaintStroke> Strokes = new();
 
@@ -116,8 +119,9 @@ namespace Goop.Paint
 
         private void SetupRenderMesh()
         {
-            // Per-instance mesh copy so we can write vertex colors without touching the shared asset.
-            _renderMesh = Instantiate(_renderer.sharedMesh);
+            // Per-instance, SUBDIVIDED mesh copy: dense verts = sharp vertex paint. Collider + baked verts
+            // downstream all derive from this same mesh, so raycasts and paint stay aligned.
+            _renderMesh = Subdivide(_renderer.sharedMesh, Mathf.Clamp(paintSubdivisions, 0, 3));
             _renderer.sharedMesh = _renderMesh;
 
             int n = _renderMesh.vertexCount;
@@ -131,6 +135,104 @@ namespace Goop.Paint
 
             _localBoundsDiag = Mathf.Max(0.0001f, _renderMesh.bounds.size.magnitude);
             _worldBoundsDiag = Mathf.Max(0.0001f, _renderer.bounds.size.magnitude);
+        }
+
+        /// <summary>Midpoint-subdivide a skinned mesh N times (each level ×4 triangles), interpolating
+        /// position/normal/uv AND bone weights so the result still skins correctly. Bind poses and bones
+        /// are unchanged. Used only for the paint mesh, to make vertex painting sharp.</summary>
+        private static Mesh Subdivide(Mesh src, int levels)
+        {
+            var mesh = Instantiate(src);
+            if (levels <= 0) return mesh;
+
+            for (int lvl = 0; lvl < levels; lvl++)
+            {
+                var verts = new System.Collections.Generic.List<Vector3>(mesh.vertices);
+                var norms = new System.Collections.Generic.List<Vector3>(mesh.normals);
+                var uvs = new System.Collections.Generic.List<Vector2>();
+                mesh.GetUVs(0, uvs);
+                bool hasUV = uvs.Count == verts.Count;
+                var bw = mesh.boneWeights;
+                bool hasBW = bw != null && bw.Length == verts.Count;
+                var bwList = new System.Collections.Generic.List<BoneWeight>(hasBW ? bw : new BoneWeight[0]);
+
+                int[] tris = mesh.triangles;
+                var newTris = new System.Collections.Generic.List<int>(tris.Length * 4);
+                var midCache = new System.Collections.Generic.Dictionary<long, int>();
+
+                int Mid(int a, int b)
+                {
+                    long key = a < b ? ((long)a << 32) | (uint)b : ((long)b << 32) | (uint)a;
+                    if (midCache.TryGetValue(key, out int idx)) return idx;
+                    idx = verts.Count;
+                    verts.Add((verts[a] + verts[b]) * 0.5f);
+                    if (norms.Count == idx) norms.Add((norms[a] + norms[b]).normalized);
+                    if (hasUV) uvs.Add((uvs[a] + uvs[b]) * 0.5f);
+                    if (hasBW) bwList.Add(BlendWeights(bwList[a], bwList[b]));
+                    midCache[key] = idx;
+                    return idx;
+                }
+
+                for (int t = 0; t < tris.Length; t += 3)
+                {
+                    int a = tris[t], b = tris[t + 1], c = tris[t + 2];
+                    int ab = Mid(a, b), bc = Mid(b, c), ca = Mid(c, a);
+                    newTris.Add(a); newTris.Add(ab); newTris.Add(ca);
+                    newTris.Add(ab); newTris.Add(b); newTris.Add(bc);
+                    newTris.Add(ca); newTris.Add(bc); newTris.Add(c);
+                    newTris.Add(ab); newTris.Add(bc); newTris.Add(ca);
+                }
+
+                var bindposes = mesh.bindposes;
+                mesh.Clear();
+                mesh.indexFormat = verts.Count > 65535 ? UnityEngine.Rendering.IndexFormat.UInt32 : UnityEngine.Rendering.IndexFormat.UInt16;
+                mesh.SetVertices(verts);
+                if (norms.Count == verts.Count) mesh.SetNormals(norms);
+                if (hasUV) mesh.SetUVs(0, uvs);
+                if (hasBW)
+                {
+                    mesh.boneWeights = bwList.ToArray();
+                    mesh.bindposes = bindposes;
+                }
+                mesh.SetTriangles(newTris, 0);
+                mesh.RecalculateBounds();
+            }
+            return mesh;
+        }
+
+        /// <summary>Blend two BoneWeights 50/50: merge shared bone indices, keep the top 4, renormalize.</summary>
+        private static BoneWeight BlendWeights(BoneWeight w0, BoneWeight w1)
+        {
+            var acc = new System.Collections.Generic.Dictionary<int, float>();
+            void Add(int idx, float wt) { if (wt <= 0f) return; acc.TryGetValue(idx, out float cur); acc[idx] = cur + wt; }
+            Add(w0.boneIndex0, w0.weight0 * 0.5f); Add(w0.boneIndex1, w0.weight1 * 0.5f);
+            Add(w0.boneIndex2, w0.weight2 * 0.5f); Add(w0.boneIndex3, w0.weight3 * 0.5f);
+            Add(w1.boneIndex0, w1.weight0 * 0.5f); Add(w1.boneIndex1, w1.weight1 * 0.5f);
+            Add(w1.boneIndex2, w1.weight2 * 0.5f); Add(w1.boneIndex3, w1.weight3 * 0.5f);
+
+            // top 4 by weight
+            var top = new (int idx, float wt)[4];
+            foreach (var kv in acc)
+            {
+                for (int i = 0; i < 4; i++)
+                {
+                    if (kv.Value > top[i].wt)
+                    {
+                        for (int j = 3; j > i; j--) top[j] = top[j - 1];
+                        top[i] = (kv.Key, kv.Value);
+                        break;
+                    }
+                }
+            }
+            float sum = top[0].wt + top[1].wt + top[2].wt + top[3].wt;
+            if (sum <= 0f) return w0;
+            return new BoneWeight
+            {
+                boneIndex0 = top[0].idx, weight0 = top[0].wt / sum,
+                boneIndex1 = top[1].idx, weight1 = top[1].wt / sum,
+                boneIndex2 = top[2].idx, weight2 = top[2].wt / sum,
+                boneIndex3 = top[3].idx, weight3 = top[3].wt / sum,
+            };
         }
 
         private void ResetVertexData()
