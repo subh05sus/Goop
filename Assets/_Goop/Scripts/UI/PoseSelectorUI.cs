@@ -24,9 +24,7 @@ namespace Goop.UI
 
         private const int SegmentCount = PoseController.PoseCount + 1; // + idle
 
-        private static string PoseLabel(int index) =>
-            index == 0 ? "Idle" :
-            (index - 1 < PoseCatalog.PoseNames.Length ? PoseCatalog.PoseNames[index - 1] : $"Pose {index}");
+        private static string PoseLabel(int index) => PoseCatalog.Display(index);
 
         /// <summary>Thumbnails are pre-rendered at edit time into Resources/PosePreviews (pose_01..pose_18)
         /// — zero runtime rendering cost, just a texture load on first wheel open.</summary>
