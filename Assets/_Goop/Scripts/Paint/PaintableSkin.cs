@@ -19,7 +19,7 @@ namespace Goop.Paint
     public class PaintableSkin : NetworkBehaviour
     {
         private const float MaxBrushSize = 0.15f;   // fraction of the mesh bounds diagonal
-        private const float DefaultSmoothness = 0.35f;
+        private const float DefaultSmoothness = 0.15f; // matte body by default (paint sets its own sheen)
 
         [SerializeField] private float brushSize = 0.03f;
         [SerializeField] private InputActionAsset inputActions;
@@ -140,6 +140,7 @@ namespace Goop.Paint
 
         private void UploadVertexData()
         {
+            if (_renderMesh == null || !_renderMesh.isReadable) return;
             _renderMesh.colors32 = _colors;
             _renderMesh.SetUVs(1, new System.Collections.Generic.List<Vector2>(_mr));
         }
