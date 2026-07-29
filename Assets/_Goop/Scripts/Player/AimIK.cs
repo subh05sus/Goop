@@ -40,6 +40,7 @@ namespace Goop.Player
         private PoseController _poseController;
         private SurfaceAttachController _attach;
         private NetworkPlayer _networkPlayer;
+        private Goop.Paint.PaintModeController _paintMode;
         private Vector2 _current;
 
         private void Awake()
@@ -48,6 +49,7 @@ namespace Goop.Player
             _attach = GetComponentInParent<SurfaceAttachController>();
             _networkPlayer = GetComponentInParent<NetworkPlayer>();
             _poseController = GetComponent<PoseController>();
+            _paintMode = GetComponent<Goop.Paint.PaintModeController>();
 
             _bones = new Transform[BoneNames.Length];
             _lastSet = new Quaternion[BoneNames.Length];
@@ -72,7 +74,10 @@ namespace Goop.Player
         private bool Suppressed =>
             (_poseController != null && _poseController.PoseIndex.Value != PoseController.IdlePoseIndex)
             || (_attach != null && _attach.IsAttached)
-            || (_networkPlayer != null && !_networkPlayer.IsAlive.Value);
+            || (_networkPlayer != null && !_networkPlayer.IsAlive.Value)
+            // In paint mode the camera free-orbits (MMB); the body must stay put so you can paint every
+            // side — no aim-driven torso twist or body turn while painting.
+            || (_paintMode != null && _paintMode.InPaintMode);
 
         private void Update()
         {

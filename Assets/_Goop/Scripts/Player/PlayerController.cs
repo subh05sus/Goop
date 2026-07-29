@@ -35,6 +35,13 @@ namespace Goop.Player
         [SerializeField] private float maxPitch = 75f;
         [SerializeField] private float cameraCollisionRadius = 0.25f;
 
+        [Header("Zoom (mouse scroll)")]
+        [SerializeField] private float minZoom = 1.2f;
+        [SerializeField] private float maxZoom = 7f;
+        [SerializeField] private float zoomStep = 0.5f;
+        // Current scroll-driven camera distance; initialized to cameraDistance on spawn.
+        private float _zoomDistance;
+
         /// <summary>True while any UI system (paint mode, chat, pause menu, pose wheel) owns the
         /// mouse/keyboard. Gravity still applies; look + move input are ignored, cursor is released.
         /// Lock ownership is per-source so overlapping systems can't stomp each other's lock.</summary>
@@ -122,6 +129,7 @@ namespace Goop.Player
 
             _poseController = GetComponentInChildren<Goop.Gameplay.PoseController>();
             _yaw = transform.eulerAngles.y;
+            _zoomDistance = cameraDistance;
             CreateCameraRig();
         }
 
@@ -185,6 +193,17 @@ namespace Goop.Player
 
             bool inputBlocked = MovementLocked;
             SetCursorLocked(!inputBlocked);
+
+            // Scroll-wheel zoom works even in paint mode (so you can pull the camera in/out to paint) —
+            // but not while the cursor is over the palette (that scroll belongs to the UI).
+            if (UnityEngine.InputSystem.Mouse.current != null && !Goop.UI.PaletteUI.PointerOverPaintUI)
+            {
+                float scroll = UnityEngine.InputSystem.Mouse.current.scroll.ReadValue().y;
+                if (Mathf.Abs(scroll) > 0.01f)
+                {
+                    _zoomDistance = Mathf.Clamp(_zoomDistance - Mathf.Sign(scroll) * zoomStep, minZoom, maxZoom);
+                }
+            }
 
             if (!inputBlocked)
             {
@@ -296,7 +315,8 @@ namespace Goop.Player
         {
             if (!IsOwner || _cameraRig == null || _camera == null || !_camera.enabled) return;
 
-            float distance = PaintViewActive ? cameraDistance * 0.55f : cameraDistance;
+            // Scroll-driven zoom distance (paint mode still pulls in a touch closer for detail work).
+            float distance = PaintViewActive ? _zoomDistance * 0.7f : _zoomDistance;
             Quaternion camRot = Quaternion.Euler(_pitch, _yaw, 0f);
             float pivotHeight = PaintViewActive ? standingHeight * 0.55f
                 : (IsCrouching ? cameraShoulderHeight * 0.6f : cameraShoulderHeight);

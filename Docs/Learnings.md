@@ -460,3 +460,15 @@ NetworkVariable fields all had writePerm passed explicitly, but the Strokes Netw
 and NetworkList's default writePerm is Server. Host-as-owner masked it (host IS the server); real clients
 were rejected on every stroke. Rule: ALWAYS pass writePerm explicitly on NetworkList too:
 `new NetworkList<T>(writePerm: NetworkVariableWritePermission.Owner)`.
+
+## 2026-07-24 — "torso floods" persisted across two paint algorithms = STALE MPPM assemblies
+User reported identical "whole torso paints from one dab" after BOTH the UV-disc algorithm AND the
+rewritten 3D-surface-distance algorithm. Two different algorithms cannot produce the identical bug unless
+neither ran. Root cause: the MPPM virtual player compiles its OWN copy of the assemblies under Library/VP
+and does not pick up edits made in the main editor until it is restarted (or Library/VP wiped). The user
+was painting on the stale virtual player.
+Verification (editor-side, GoopChar.fbx): UVs are UNIQUE (max per-texel 3D spread 2% of body, 0% texels
+overlapping), and simulating the exact runtime PaintDab on the runtime-baked mesh gives a compact ~2mm
+blob (~7% surface at brush 0.045), never the torso. Algorithm confirmed correct.
+Actions: default brush 0.045 -> 0.02, texture 256 -> 512 (finer strokes). Standing rule (again): after ANY
+code change, RESTART virtual players before testing, or you are testing old code.

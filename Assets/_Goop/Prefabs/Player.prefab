@@ -244,6 +244,9 @@ MonoBehaviour:
   minPitch: -55
   maxPitch: 75
   cameraCollisionRadius: 0.25
+  minZoom: 1.2
+  maxZoom: 7
+  zoomStep: 0.5
   IsProne:
     UpdateTraits:
       MinSecondsBetweenUpdates: 0
@@ -481,12 +484,19 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Goop.Paint.PaintableSkin
   ShowTopMostFoldoutHeaderGroup: 1
-  textureSize: 256
-  brushSize: 0.045
+  textureSize: 512
+  brushSize: 0.02
   inputActions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}
+  CastShadows:
+    UpdateTraits:
+      MinSecondsBetweenUpdates: 0
+      MaxSecondsBetweenUpdates: 0
+    m_InternalValue: 1
   CurrentColor:
     serializedVersion: 2
     rgba: 4280821960
+  CurrentMetallic: 0
+  CurrentRoughness: 0.65
 --- !u!114 &977617763206466554
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -541,6 +551,7 @@ MonoBehaviour:
   ShowTopMostFoldoutHeaderGroup: 1
   maxYawOffset: 65
   smoothing: 12
+  bodyTurnSpeed: 200
   AimAngles:
     UpdateTraits:
       MinSecondsBetweenUpdates: 0

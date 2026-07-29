@@ -75,7 +75,7 @@ namespace Goop.Paint
                 _skin.BrushSize += dx * brushSizePerPixel;
             }
 
-            // Self-inspect orbit: hold MMB, drag.
+            // Free-orbit the camera around yourself while holding MMB + moving the mouse (self-inspect).
             if (Mouse.current.middleButton.isPressed && _playerController != null)
             {
                 _playerController.OrbitCamera(Mouse.current.delta.ReadValue());
@@ -108,11 +108,12 @@ namespace Goop.Paint
             _brushRing.gameObject.SetActive(show);
             if (!show) return;
 
-            // UV brush size -> approximate world radius: the UV atlas spans roughly the ~2m body,
-            // so world radius ≈ brushSize * 2. Close enough for an aiming aid.
-            float worldRadius = Mathf.Max(0.02f, _skin.BrushSize * 2f);
+            // True world brush radius (matches what PaintDab actually covers), sat slightly off the
+            // surface along the hit normal so the ring rides ON the mesh instead of clipping inside it.
+            float worldRadius = Mathf.Max(0.02f, _skin.WorldBrushRadius);
             var t = _brushRing.transform;
-            t.SetPositionAndRotation(hit.point + hit.normal * 0.01f, Quaternion.LookRotation(hit.normal));
+            t.SetPositionAndRotation(hit.point + hit.normal * (worldRadius * 0.15f + 0.02f),
+                Quaternion.LookRotation(hit.normal));
             t.localScale = Vector3.one * worldRadius;
             _brushRing.startColor = _brushRing.endColor = (Color)_skin.CurrentColor;
         }
